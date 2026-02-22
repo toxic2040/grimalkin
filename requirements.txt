@@ -1,9 +1,13 @@
-llama-index
+# Grimalkin v2.0 — Dependencies
+# Core (required)
+gradio>=4.0
+
+# RAG / Vault indexing (required for Vault Q&A)
 langchain-ollama
 langchain-community
+langchain-text-splitters
 faiss-cpu
-watchdog
-tenacity
-tqdm
 pypdf
-gradio>=5.0
+
+# Optional: .docx support in Vault
+# docx2txt
