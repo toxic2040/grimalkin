@@ -21,14 +21,20 @@ CHUNK_OVERLAP = 100
 
 
 def build_index():
+<<<<<<< Updated upstream
     """Build or rebuild FAISS index — now with full debugging and never crashes on empty."""
     print("🔨 Building FAISS index from knowledge/ and ALL subfolders...")
+=======
+    """Build or rebuild the full FAISS index from knowledge/ (including ALL nested folders)."""
+    print("Building FAISS index from knowledge/ and all subfolders...")
+>>>>>>> Stashed changes
 
     knowledge_dir = Path("knowledge").resolve()
     print(f"→ Scanning absolute path: {knowledge_dir}")
     print(f"   Folder exists: {knowledge_dir.exists()}")
     print(f"   Is directory: {knowledge_dir.is_dir()}")
 
+<<<<<<< Updated upstream
     if not knowledge_dir.exists():
         print("❌ 'knowledge' folder not found in current directory!")
         print("   Run: mkdir -p knowledge")
@@ -52,25 +58,66 @@ def build_index():
     pdf_docs = DirectoryLoader(
         str(knowledge_dir), glob="**/*.pdf", loader_cls=PyPDFLoader,
         show_progress=True, use_multithreading=True, recursive=True
+=======
+    # PDFs - recursive
+    pdf_docs = DirectoryLoader(
+        knowledge, 
+        glob="**/*.pdf", 
+        loader_cls=PyPDFLoader,
+        show_progress=True, 
+        use_multithreading=True,
+        recursive=True          # ← This was the missing piece
+>>>>>>> Stashed changes
     ).load()
 
     md_docs = DirectoryLoader(
+<<<<<<< Updated upstream
         str(knowledge_dir), glob="**/*.md", loader_cls=TextLoader,
         show_progress=True, use_multithreading=True, recursive=True
+=======
+        knowledge, 
+        glob="**/*.md", 
+        loader_cls=TextLoader,
+        show_progress=True, 
+        use_multithreading=True,
+        recursive=True
+>>>>>>> Stashed changes
     ).load()
 
     txt_docs = DirectoryLoader(
+<<<<<<< Updated upstream
         str(knowledge_dir), glob="**/*.txt", loader_cls=TextLoader,
         show_progress=True, use_multithreading=True, recursive=True
+=======
+        knowledge, 
+        glob="**/*.txt", 
+        loader_cls=TextLoader,
+        show_progress=True, 
+        use_multithreading=True,
+        recursive=True
+>>>>>>> Stashed changes
     ).load()
 
     csv_docs = DirectoryLoader(
+<<<<<<< Updated upstream
         str(knowledge_dir), glob="**/*.csv", loader_cls=CSVLoader,
         show_progress=True, use_multithreading=True, recursive=True
     ).load()
 
     all_docs = pdf_docs + md_docs + txt_docs + csv_docs
     print(f"✅ Successfully loaded {len(all_docs)} documents (including nested folders)")
+=======
+        knowledge, 
+        glob="**/*.csv", 
+        loader_cls=CSVLoader,
+        show_progress=True, 
+        use_multithreading=True,
+        recursive=True
+    ).load()
+
+    all_docs = pdf_docs + md_docs + txt_docs + csv_docs
+    print(f"Loaded {len(all_docs)} documents from knowledge/ (including nested folders)")
+>>>>>>> Stashed changes
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP
@@ -85,6 +132,9 @@ def build_index():
     print("🎉 Index built successfully!")
     print(f"   Saved to: {FAISS_INDEX_DIR}/")
     return vectorstore
+<<<<<<< Updated upstream
 
 if __name__ == "__main__":
     build_index()
+=======
+>>>>>>> Stashed changes
