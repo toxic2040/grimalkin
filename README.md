@@ -197,9 +197,9 @@ pip install docx2txt
 - [x] FAISS incremental indexing
 - [x] Corporate-speak scrubber + drift recovery
 - [x] Serious mode toggle
-- [ ] Custom file categories via Scratch Post
-- [ ] Nightly batch topic tagging
-- [ ] Per-file LLM-generated notes
+- [x] Custom file categories via Scratch Post
+- [x] Nightly batch topic tagging
+- [x] Per-file LLM-generated notes
 - [ ] "Burn" ceremony UI for animated deletion
 - [ ] Knowledge graph (entity extraction) — v3.0
 
