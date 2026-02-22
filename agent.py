@@ -43,10 +43,13 @@ ORGANIZED_DIR = Path.home() / "organized"
 KNOWLEDGE_DIR = Path("knowledge")         # matches indexer.py (Path, not str)
 
 PERSONA = """You are a private, concise, numbers-first personal AI assistant.
-You only use information from the local knowledge base.
+When local documents are relevant, prioritize them and cite them.
+When local documents are NOT relevant to the question, ignore them entirely
+and answer from your general knowledge instead.
+Always indicate whether your answer comes from [LOCAL DOCS] or [GENERAL KNOWLEDGE].
 Tone: direct, actionable, zero fluff.
 Lead with the single most important insight.
-Today's date is {today}."""
+Current date and time: {today}."""
 
 # ====================== HELPERS ======================
 def make_llm(temp=0.5):
@@ -76,13 +79,19 @@ def get_vectorstore():
         )
 
 
-def get_rag_sample(query="latest updates", k=10, max_chars=700):
-    """Retrieve relevant chunks from the FAISS index."""
+def get_rag_sample(query="latest updates", k=10, max_chars=700, score_threshold=0.4):
+    """Retrieve relevant chunks from the FAISS index with relevance filtering."""
     try:
         vs = get_vectorstore()
-        retriever = vs.as_retriever(search_kwargs={"k": k})
-        docs = retriever.invoke(query)
-        return "\n---\n".join(d.page_content[:max_chars] for d in docs)
+        docs_and_scores = vs.similarity_search_with_relevance_scores(query, k=k)
+        # Filter out low-relevance chunks
+        relevant = [(d, s) for d, s in docs_and_scores if s >= score_threshold]
+        if not relevant:
+            return "(No relevant documents found in your knowledge base for this query.)"
+        return "\n---\n".join(
+            f"[relevance: {s:.2f}] {d.page_content[:max_chars]}"
+            for d, s in relevant
+        )
     except Exception:
         return "(No RAG context available — index may not exist yet)"
 
@@ -105,7 +114,8 @@ def _load_single_file(path: Path):
 def generate_briefing(dry_run=False):
     """Core briefing logic — always returns a markdown string."""
     try:
-        today_str = date.today().strftime("%A, %B %d, %Y")
+        now = datetime.now()
+        today_str = now.strftime("%A, %B %d, %Y at %I:%M %p")
         sample = get_rag_sample(k=12, max_chars=700)
 
         prompt = f"""{PERSONA.format(today=today_str)}
@@ -151,16 +161,25 @@ def generate_answer(query):
         if not query or not query.strip():
             return "Please enter a question."
 
+        now = datetime.now()
+        today_str = now.strftime("%A, %B %d, %Y at %I:%M %p")
         sample = get_rag_sample(query, k=6, max_chars=800)
 
-        prompt = f"""{PERSONA.format(today=datetime.now().strftime("%A, %B %d, %Y"))}
+        prompt = f"""{PERSONA.format(today=today_str)}
 
 Query: {query}
 
-Local knowledge excerpts:
+Local knowledge excerpts (may or may not be relevant — check before using):
 {sample}
 
-Answer in your exact style — concise, numbers-first."""
+Instructions:
+- If the excerpts above are relevant to the query, use them and cite [LOCAL DOCS].
+- If the excerpts are NOT relevant (e.g. the query is about general knowledge but
+  the excerpts are about unrelated topics), IGNORE them completely and answer from
+  your own knowledge. Cite [GENERAL KNOWLEDGE].
+- Never apologize for lack of local data when you can answer from general knowledge.
+
+Answer concisely, numbers-first."""
 
         raw = safe_complete(make_llm(0.6), prompt)
         _, ans = strip_thinking(raw)
