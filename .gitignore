@@ -1,0 +1,8 @@
+faiss_index/
+knowledge/
+__pycache__/
+*.pyc
+.DS_Store
+briefings/log.txt
+organized/
+knowledge/.DS_Store

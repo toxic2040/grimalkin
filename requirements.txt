@@ -1,0 +1,9 @@
+llama-index
+langchain-ollama
+langchain-community
+faiss-cpu
+watchdog
+tenacity
+tqdm
+pypdf
+gradio>=5.0
