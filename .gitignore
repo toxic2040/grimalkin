@@ -1,8 +1,36 @@
+# Grimalkin runtime data
+grimalkin_memory.db
+grimalkin_memory.db-wal
+grimalkin_memory.db-shm
 faiss_index/
-knowledge/
+sorted/
+vault/
+
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
 .DS_Store
-briefings/log.txt
-organized/
-knowledge/.DS_Store
+Thumbs.db
+
+# Logs
+*.log
