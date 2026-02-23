@@ -1,40 +1,17 @@
-# Grimalkin runtime data
-grimalkin_memory.db
-grimalkin_memory.db-wal
-grimalkin_memory.db-shm
+grimalkin.db
+grimalkin.db-wal
+grimalkin.db-shm
 faiss_index/
 sorted/
 vault/
-
-# Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-*.egg-info/
-dist/
-build/
-*.egg
-
-# Virtual environments
-.venv/
+*.pyc
+*.pyo
 venv/
-env/
-
-# IDE
+.venv/
 .vscode/
 .idea/
 *.swp
-*.swo
 *~
-
-# OS
 .DS_Store
 Thumbs.db
-
-# Logs
-*.log
-knowledge/
-*.png
-knowledge/
-*.png

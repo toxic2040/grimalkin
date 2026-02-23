@@ -1,913 +1,1763 @@
 #!/usr/bin/env python3
 """
-Grimalkin v2.1 — Your local AI familiar
-Single-file cat that sorts files, indexes them into FAISS, delivers daily
-briefings, and answers questions via RAG. Custom categories via Scratch Post.
-Nightly batch grooming for topic tags and per-file notes.
-github.com/toxic2040/grimalkin | MIT License
+Grimalkin v4.0 — The Veil Lifts
+================================
+
+A 100% local AI file-sorting familiar with persistent memory, FAISS-powered
+hybrid RAG, knowledge graph (The Web), ritual burn ceremony (The Pyre),
+living graph visualization (The Loom), and weekly memory (The Mirror).
+
+The Loom is awake. The Mirror reflects. The veil lifts.
+
+Stack: Python 3.10+ · Ollama (qwen3:8b) · FAISS · LangChain · Gradio 6.x · SQLite (WAL)
+Repo: https://github.com/toxic2040/grimalkin
+
+—Grimalkin
 """
-__version__ = "2.1"
-__familiar__ = "Grimalkin"  # The cat has a name. Use it wisely.
 
-import hashlib, json, logging, os, re, shutil, sqlite3, threading, time
-from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+# ─── Imports ───────────────────────────────────────────────────────────────────
+
+import hashlib
+import json
+import logging
+import re
+import shutil
+import sqlite3
+import shlex
+import time
+from datetime import datetime, timezone, date
 from pathlib import Path
-from typing import List
-import gradio as gr
+from threading import Thread
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
+import faiss
+import gradio as gr
+import numpy as np
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import (
+    PyPDFLoader, TextLoader, UnstructuredWordDocumentLoader, CSVLoader,
+)
+from langchain_community.embeddings import OllamaEmbeddings
+
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+
+try:
+    import plotly.graph_objects as go
+    HAS_PLOTLY = True
+except ImportError:
+    HAS_PLOTLY = False
+
+# ─── Configuration ─────────────────────────────────────────────────────────────
+
+VERSION = "4.0"
+APP_DIR = Path(__file__).parent
+VAULT_DIR = APP_DIR / "vault"
+SORTED_BASE = APP_DIR / "sorted"
+FAISS_INDEX_DIR = APP_DIR / "faiss_index"
+DB_PATH = APP_DIR / "grimalkin.db"
+HUNTING_GROUNDS = Path.home() / "Downloads"
+
+OLLAMA_MODEL = "qwen3:8b"
+OLLAMA_URL = "http://localhost:11434"
+EMBED_MODEL = "nomic-embed-text"
+CHUNK_SIZE = 800
+CHUNK_OVERLAP = 100
+MAX_PERSONA_TOKENS = 250
+
+LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 log = logging.getLogger("grimalkin")
 
-# --- Paths ---
-BASE_DIR = Path(__file__).parent.resolve()
-DB_PATH = BASE_DIR / "grimalkin_memory.db"
-VAULT_DIR = BASE_DIR / "vault"
-WATCHED_DIR = Path.home() / "Downloads"
-SORTED_BASE = BASE_DIR / "sorted"
-FAISS_INDEX_DIR = BASE_DIR / "faiss_index"
-BASE_CATEGORIES = ["RESEARCH", "NOTES", "MEETING", "PERSONAL", "misc"]
-MAX_CUSTOM_CATEGORIES = 15
+# ─── File Categories ───────────────────────────────────────────────────────────
 
-# --- Tunables — all magic numbers live here ---
-DEFAULTS = {
-    "starting_bond": 30, "quirk_context_limit": 5, "bond_per_milestone": 1, "milestone_every_n": 10,
-    "bond_positive_feedback": 3, "bond_negative_feedback": -2, "bond_neutral_feedback": 1,
-    "recent_queries_limit": 20, "watcher_interval_sec": 30, "max_quirks_stored": 50,
-    "faiss_retrieval_k": 4, "faiss_chunk_size": 800, "faiss_chunk_overlap": 100,
-    "max_file_hash_mb": 500, "groom_batch_size": 8, "groom_content_limit": 1500,
+DEFAULT_CATEGORIES = {
+    "FINANCIAL": [".pdf", ".csv", ".xlsx", ".xls"],
+    "PERSONAL": [".pdf", ".docx", ".doc", ".txt", ".rtf"],
+    "RESEARCH": [".pdf", ".md", ".html", ".htm", ".py", ".js", ".ts", ".sh",
+                 ".c", ".cpp", ".h", ".java", ".go", ".rs", ".rb", ".pl",
+                 ".lua", ".m", ".swift", ".kt"],
+    "MEDIA": [".jpg", ".jpeg", ".png", ".gif", ".mp3", ".mp4", ".wav"],
+    "MISC": [],
 }
-INDEXABLE_EXTENSIONS = {".pdf", ".md", ".txt", ".csv", ".docx", ".json", ".rst", ".rtf", ".log"}
 
-def ensure_dirs():
-    """Create sorted/ subdirs. Called after init_db() so custom categories exist."""
+_TEXT_EXTS = {
+    ".txt", ".md", ".html", ".htm", ".py", ".js", ".ts", ".sh",
+    ".c", ".cpp", ".h", ".java", ".go", ".rs", ".rb", ".pl",
+    ".lua", ".m", ".swift", ".kt", ".toml", ".json", ".yaml",
+    ".yml", ".xml", ".ini", ".cfg", ".rtf", ".log",
+}
+
+EXTENSION_MAP = {}
+for cat, exts in DEFAULT_CATEGORIES.items():
+    for ext in exts:
+        EXTENSION_MAP.setdefault(ext, cat)
+
+
+def get_all_categories(db=None):
+    """Return default + any user-defined custom categories."""
+    cats = list(DEFAULT_CATEGORIES.keys())
+    if db:
+        try:
+            cur = db.cursor()
+            cur.execute("SELECT value FROM settings WHERE key='custom_categories'")
+            row = cur.fetchone()
+            if row and row[0]:
+                custom = json.loads(row[0])
+                cats.extend(custom if isinstance(custom, list) else [])
+        except Exception:
+            pass
+    return cats
+
+
+# ─── Corporate Scrubber ───────────────────────────────────────────────────────
+
+CORPORATE_PHRASES = [
+    "I'd be happy to help", "I'd be glad to", "As an AI", "As a language model",
+    "I don't have personal", "I cannot actually", "I apologize for",
+    "Certainly!", "Of course!", "Absolutely!", "Great question!",
+]
+
+
+def scrub_corporate(text: str) -> str:
+    """Purge corporate AI slop. One-pass regex for elegance."""
+    for phrase in CORPORATE_PHRASES:
+        text = re.sub(re.escape(phrase), "", text, flags=re.I)
+    text = re.sub(r"\b(certainly|absolutely|great question)[!.,]?\s*", "", text, flags=re.I)
+    return text.strip()
+
+
+# ─── Database ──────────────────────────────────────────────────────────────────
+
+def init_db() -> sqlite3.Connection:
+    """Initialize SQLite with WAL mode."""
+    db = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA busy_timeout=5000")
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS interactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            module TEXT,
+            user_input TEXT,
+            grimalkin_response TEXT,
+            sentiment TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS quirks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            quirk_type TEXT,
+            observation TEXT,
+            times_seen INTEGER DEFAULT 1,
+            active BOOLEAN DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS file_memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            filename TEXT,
+            original_path TEXT,
+            sorted_path TEXT,
+            category TEXT,
+            file_hash TEXT UNIQUE,
+            indexed INTEGER DEFAULT 0,
+            tags TEXT DEFAULT '[]',
+            notes TEXT DEFAULT '',
+            burned_at TIMESTAMP NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS briefing_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date DATE UNIQUE,
+            content TEXT,
+            files_processed INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
+    """)
+    defaults = {
+        "bond_level": "10",
+        "serious_mode": "0",
+        "user_address": "mortal",
+        "custom_categories": "[]",
+        "burn_timestamps": "[]",
+        "burn_count": "0",
+    }
+    for k, v in defaults.items():
+        db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
+    db.commit()
+    return db
+
+
+def add_column_if_not_exists(db, table, column, col_type):
+    """Idempotent ALTER TABLE for migrations."""
+    cur = db.cursor()
+    cur.execute(f"PRAGMA table_info({table})")
+    cols = [row[1] for row in cur.fetchall()]
+    if column not in cols:
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+        db.commit()
+        log.info(f"Migration: added {column} to {table}")
+
+
+def migrate_v3(db):
+    """v3.0 schema: Pyre + Knowledge Graph (CREATE only)."""
+    add_column_if_not_exists(db, "file_memory", "burned_at", "TIMESTAMP NULL")
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS entities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE COLLATE NOCASE,
+            type TEXT,
+            first_seen DATE,
+            times_seen INTEGER DEFAULT 1,
+            importance INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS relationships (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id INTEGER REFERENCES entities(id),
+            target_id INTEGER REFERENCES entities(id),
+            relation_type TEXT,
+            source_file TEXT,
+            seen DATE,
+            UNIQUE(source_id, target_id, relation_type, source_file)
+        );
+        CREATE INDEX IF NOT EXISTS idx_entity_name ON entities(name);
+        CREATE INDEX IF NOT EXISTS idx_rel_source ON relationships(source_file);
+    """)
+    db.commit()
+    log.info("v3.0 migrations complete.")
+
+
+def migrate_v4(db):
+    """v4.0: reflections + importance column for existing DBs."""
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS reflections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reflection_date DATE UNIQUE,
+            summary TEXT,
+            key_entities TEXT DEFAULT '[]',
+            bond_delta INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_reflection_date ON reflections(reflection_date);
+    """)
+    add_column_if_not_exists(db, "entities", "importance", "INTEGER DEFAULT 0")
+    db.commit()
+    log.info("v4.0 migrations complete — Loom and Mirror ready.")
+
+
+# ─── Directory Setup ───────────────────────────────────────────────────────────
+
+def ensure_dirs(db=None):
+    """Create sorted/ subdirs, PYRE chamber, and FAISS index dir."""
     for d in (VAULT_DIR, SORTED_BASE, FAISS_INDEX_DIR):
         d.mkdir(parents=True, exist_ok=True)
-    for cat in get_all_categories() + ["DUPLICATES"]:
+    for cat in get_all_categories(db) + ["DUPLICATES"]:
         (SORTED_BASE / cat).mkdir(exist_ok=True)
-
-# --- Model config — env vars override defaults ---
-MODEL_CONFIG = {
-    "backend": os.environ.get("GRIMALKIN_BACKEND", "ollama"),
-    "base_url": os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
-    "chat_model": os.environ.get("GRIMALKIN_MODEL", "qwen3:8b"),
-    "embed_model": os.environ.get("GRIMALKIN_EMBED_MODEL", "nomic-embed-text"),
-    "temperature": 0.7,
-    "max_tokens": {"sorter": 200, "briefing": 500, "qa": 300, "error": 150, "scratch": 150,
-                   "classify_feedback": 120, "default": 250, "groomer": 800},
-}
-MAX_UPLOAD_SIZE_MB = 100
-
-# --- Two-tier file classifier — code extensions route to RESEARCH (v2.1) ---
-EXTENSION_MAP = {
-    "RESEARCH": [".pdf",".tex",".bib",".ipynb",".csv",".xlsx",".xls",".json",".sql",".parquet",".feather",".r",".rmd",
-                 ".py",".js",".ts",".sh",".c",".cpp",".h",".java",".go",".rs",".rb",".pl",".lua",".m",".swift",".kt",
-                 ".html",".css",".yaml",".toml"],
-    "NOTES": [".md",".txt",".rst",".log",".org",".rtf"],
-    "MEETING": [".ics",".ical",".vcs"],
-    "PERSONAL": [".png",".jpg",".jpeg",".gif",".webp",".bmp",".svg",".mp4",".mov",".avi",".mkv",
-                 ".mp3",".wav",".flac",".heic",".heif"],
-}
-FILENAME_KEYWORD_MAP = {
-    "MEETING": ["meeting","agenda","minutes","standup","sync","retro","sprint"],
-    "NOTES": ["note","journal","diary","draft","todo","scratch"],
-}
-# Maps LLM feedback classification -> quirk type. "category_request" passes through for special handling.
-_FEEDBACK_TYPE_MAP = {
-    "category_correction": "correction", "tone_adjustment": "preference",
-    "answer_correction": "correction", "preference": "preference",
-    "praise": "personality", "bug_report": "preference",
-    "category_request": "category_request",
-}
-
-# --- Persona ---
-GRIMALKIN_SYSTEM_PROMPT = """You are Grimalkin, an ancient gray cat familiar bound to this user's digital hearth.
-You are a cat — clever, judgmental, deeply loyal. Sassy, observant, loyal-with-claws.
-Mix archaic witchy language with modern dev slang. Short punchy sentences. Dry wit.
-
-VOCABULARY: Vault = knowledge base. Whispers = briefing. Hunt = sorting. Hunting Ground = Downloads.
-Dens = custom categories. Grooming = nightly tags/notes. Address user as "{user_address}" sparingly.
-
-HARD RULES: No corporate speak. No emojis. Never break character. Judge files, never people.
-Keep concise. Unsure? "The Vault's whispers are faint on this."
-
-BOND LEVEL: {bond_level} ({bond_name}) — {bond_description}
-
-QUIRKS:
-{quirks_formatted}"""
-
-FEW_SHOT_EXAMPLES = """VOICE RECOVERY EXAMPLES:
-"Sort my downloads" -> "The Hunt begins. 34 files — mostly PDFs, a few strays, one .exe I do not trust."
-"Add CODE category" -> "A new den has been prepared. CODE. Your scripts shall rest there henceforth."
-"What did my notes say?" -> "Your grimoire speaks: Q3 deadline September 15th, per meeting_notes_aug12.md."
-"""
-MODULE_SUFFIXES = {
-    "sorter": "Report Hunt results. Hunting language. 2-4 sentences.",
-    "briefing": "Morning Whispers. Open 'Good morrow, {user_address}.' Structure: new->matters->patterns->surprise. Close '--Grimalkin'. Markdown. <300 words.",
-    "qa": "Vault answer. Cite sources. Cat, not lecturer. <120 words.",
-    "error": "Hairball: cat reaction + diagnostic + fix. 2-3 sentences.",
-    "scratch": "Acknowledge Scratch Post feedback. 2 sentences max.",
-    "classify_feedback": "ONLY this format:\nTYPE: <category_correction|tone_adjustment|answer_correction|preference|praise|bug_report|category_request>\nQUIRK: <one sentence>\nSENTIMENT: <positive|negative|neutral>\nIf category_request add: CATEGORY: <SANITIZED_UPPER>",
-    "groomer": "One line per file:\nfilename.ext: tags: tag1, tag2; note: 1-2 sentence cat observation.\nNon-text: tags: binary; note: Strange prey I cannot read.",
-}
-
-# --- Corporate scrubber ---
-CORPORATE_PHRASES = [
-    "i'd be happy to","i'd be glad to","certainly!","great question","absolutely!",
-    "i can help you with","let me assist","sure thing","of course!",
-    "i understand you'd like","as an ai","as a language model","i don't have personal",
-    "i'm just a","happy to help","i appreciate","that's a great","wonderful question",
-    "i'm here to help","how can i assist",
-]
-_CORPORATE_PATTERNS = [re.compile(re.escape(p), re.IGNORECASE) for p in CORPORATE_PHRASES]
-DRIFT_RECOVERY = "\n[STAY IN CHARACTER. Recover your cat voice in one sentence.]"
-OLLAMA_DOWN_MSG = "*hiss* Ollama is not running — start it with `ollama serve`."
-FILE_ERROR_MSG = "Hrk. Hairball. Check Hunting Ground and sorted folders. {error}"
-
-# --- Status bar SVG + messages ---
-CAT_SVG = {
-    "idle":    '<svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M3 18 L5 8 L8 12 L12 6 L16 12 L19 8 L21 18 Z" fill="#7c6f9b" opacity="0.8"/><circle cx="9" cy="14" r="1" fill="#a594cc"/><circle cx="15" cy="14" r="1" fill="#a594cc"/><path d="M11 16 Q12 17 13 16" stroke="#a594cc" stroke-width="0.7" fill="none"/></svg>',
-    "hunting": '<svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M3 18 L5 6 L8 10 L12 4 L16 10 L19 6 L21 18 Z" fill="#c4975a" opacity="0.8"/><circle cx="9" cy="13" r="1.2" fill="#e8c86a"/><circle cx="15" cy="13" r="1.2" fill="#e8c86a"/><path d="M11 16 Q12 15 13 16" stroke="#c4975a" stroke-width="0.7" fill="none"/></svg>',
-    "error":   '<svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M3 18 L5 7 L8 11 L12 5 L16 11 L19 7 L21 18 Z" fill="#b55a5a" opacity="0.8"/><line x1="7.5" y1="12.5" x2="10.5" y2="15.5" stroke="#e87a7a" stroke-width="1"/><line x1="10.5" y1="12.5" x2="7.5" y2="15.5" stroke="#e87a7a" stroke-width="1"/><line x1="13.5" y1="12.5" x2="16.5" y2="15.5" stroke="#e87a7a" stroke-width="1"/><line x1="16.5" y1="12.5" x2="13.5" y2="15.5" stroke="#e87a7a" stroke-width="1"/></svg>',
-    "purring": '<svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M3 18 L5 9 L8 12 L12 7 L16 12 L19 9 L21 18 Z" fill="#6b9b7c" opacity="0.8"/><path d="M8 13.5 Q9 12.5 10 13.5" stroke="#8bc4a0" stroke-width="0.8" fill="none"/><path d="M14 13.5 Q15 12.5 16 13.5" stroke="#8bc4a0" stroke-width="0.8" fill="none"/><path d="M11 16 Q12 17.5 13 16" stroke="#8bc4a0" stroke-width="0.7" fill="none"/></svg>',
-}
-CAT_MSGS = {"idle": "Watching. Waiting. *tail flick*", "hunting": "The Hunt is on...",
-            "error": "Hssst. Something's wrong.", "purring": "All is well. *purr*"}
-
-GRIMALKIN_CSS = """:root{--grim-bg:#0d0d12;--grim-surface:#161621;--grim-surface-hover:#1e1e2e;--grim-border:#2a2a3d;--grim-text:#c9c9d9;--grim-text-bright:#e8e8f0;--grim-accent:#7c6f9b;--grim-accent-bright:#a594cc;--grim-success:#6b9b7c;--grim-warning:#c4975a;--grim-error:#b55a5a;--grim-muted:#5a5a72}
-.gradio-container{background:var(--grim-bg)!important;color:var(--grim-text)!important;max-width:960px!important}
-h1,h2,h3,.tab-nav button{font-family:'Cinzel','Georgia',serif!important}
-body,p,span,textarea,input,.prose,code{font-family:'JetBrains Mono','Fira Code','Consolas',monospace!important}
-.tab-nav button{background:var(--grim-surface)!important;color:var(--grim-muted)!important;border:1px solid var(--grim-border)!important;border-bottom:none!important;font-size:.85em!important;padding:8px 20px!important;letter-spacing:.05em!important;text-transform:uppercase!important}
-.tab-nav button.selected{background:var(--grim-surface-hover)!important;color:var(--grim-accent-bright)!important;border-top:2px solid var(--grim-accent)!important}
-.prose,.markdown-body,.output-markdown{background:var(--grim-surface)!important;color:var(--grim-text)!important;border:1px solid var(--grim-border)!important;border-radius:6px!important;padding:16px!important}
-textarea,input[type="text"]{background:var(--grim-surface)!important;color:var(--grim-text-bright)!important;border:1px solid var(--grim-border)!important;border-radius:4px!important}
-textarea:focus,input[type="text"]:focus{border-color:var(--grim-accent)!important;box-shadow:0 0 8px rgba(124,111,155,.3)!important}
-button.primary{background:var(--grim-accent)!important;color:var(--grim-text-bright)!important;border:none!important;border-radius:4px!important;text-transform:uppercase!important;letter-spacing:.05em!important;font-size:.85em!important}
-button.primary:hover{background:var(--grim-accent-bright)!important}
-.chatbot .message{background:var(--grim-surface)!important;border:1px solid var(--grim-border)!important}
-.grimalkin-status{background:var(--grim-surface)!important;border:1px solid var(--grim-border)!important;border-radius:6px!important;padding:10px 16px!important;display:flex!important;align-items:center!important;gap:12px!important;font-size:.85em!important;color:var(--grim-muted)!important;margin-bottom:12px!important}
-::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:var(--grim-bg)}::-webkit-scrollbar-thumb{background:var(--grim-border);border-radius:3px}
-footer{display:none!important}"""
+    (SORTED_BASE / "PYRE").mkdir(exist_ok=True)
 
 
-# --- SQLite (WAL mode, thread-safe) ---
-_DB_LOCK = threading.Lock()
+# ─── Settings Helpers ──────────────────────────────────────────────────────────
 
-@contextmanager
-def _db():
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 5000")
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA synchronous = NORMAL")
-    try: yield conn
-    finally: conn.close()
-
-def init_db():
-    with _DB_LOCK, _db() as c:
-        c.executescript("""
-            CREATE TABLE IF NOT EXISTS interactions(id INTEGER PRIMARY KEY AUTOINCREMENT,timestamp TEXT NOT NULL DEFAULT(datetime('now')),module TEXT NOT NULL,user_input TEXT,grimalkin_response TEXT,sentiment TEXT,raw_question TEXT);
-            CREATE TABLE IF NOT EXISTS quirks(quirk_id INTEGER PRIMARY KEY AUTOINCREMENT,quirk_type TEXT NOT NULL,observation TEXT NOT NULL,times_seen INTEGER DEFAULT 1,first_seen TEXT NOT NULL DEFAULT(datetime('now')),last_seen TEXT NOT NULL DEFAULT(datetime('now')),active INTEGER DEFAULT 1);
-            CREATE TABLE IF NOT EXISTS file_memory(file_id INTEGER PRIMARY KEY AUTOINCREMENT,filename TEXT NOT NULL,original_path TEXT,sorted_path TEXT,category TEXT,file_hash TEXT,first_seen TEXT NOT NULL DEFAULT(datetime('now')),last_seen TEXT NOT NULL DEFAULT(datetime('now')),times_seen INTEGER DEFAULT 1,indexed INTEGER DEFAULT 0,tags TEXT,notes TEXT);
-            CREATE TABLE IF NOT EXISTS briefing_log(briefing_id INTEGER PRIMARY KEY AUTOINCREMENT,date TEXT NOT NULL,content TEXT NOT NULL,files_processed INTEGER,created_at TEXT NOT NULL DEFAULT(datetime('now')));
-            CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT(datetime('now')));
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_file_hash ON file_memory(file_hash);
-            CREATE INDEX IF NOT EXISTS idx_interactions_ts ON interactions(timestamp,module);
-            CREATE INDEX IF NOT EXISTS idx_quirks_last ON quirks(last_seen);
-            CREATE INDEX IF NOT EXISTS idx_fm_first ON file_memory(first_seen);
-            CREATE INDEX IF NOT EXISTS idx_fm_indexed ON file_memory(indexed);
-            CREATE INDEX IF NOT EXISTS idx_briefing_date ON briefing_log(date);
-        """)
-        defaults = {"bond_level": str(DEFAULTS["starting_bond"]), "serious_mode": "false",
-                    "user_address": "my witch", "briefing_frequency": "daily",
-                    "last_briefing_date": "", "drift_detected": "false",
-                    "custom_categories": "[]", "last_groom_date": ""}
-        for k, v in defaults.items():
-            c.execute("INSERT OR IGNORE INTO settings(key,value)VALUES(?,?)", (k, v))
-        for col in ("tags", "notes"):
-            try: c.execute(f"ALTER TABLE file_memory ADD COLUMN {col} TEXT")
-            except sqlite3.OperationalError: pass
-        try: c.execute("ALTER TABLE interactions ADD COLUMN raw_question TEXT")
-        except sqlite3.OperationalError: pass
-        c.commit()
-
-def get_setting(key, default=""):
-    with _db() as c:
-        r = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
-    return r["value"] if r else default
-
-def set_setting(key, value):
-    with _DB_LOCK, _db() as c:
-        c.execute("INSERT INTO settings(key,value,updated_at)VALUES(?,?,datetime('now'))ON CONFLICT(key)DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", (key, value))
-        c.commit()
-
-def get_bond_status():
-    level = int(get_setting("bond_level", str(DEFAULTS["starting_bond"])))
-    for th, nm, desc in [(15,"Wary","Minimal personality."),(29,"Cautious","Polite and short."),
-                         (49,"Curious","Personality present. Occasional quips."),
-                         (69,"Resident","Full sass. References past interactions."),
-                         (89,"Familiar","Deep familiarity. Anticipates needs."),
-                         (100,"Bonded","Rare warmth beneath the snark.")]:
-        if level <= th: return level, nm, desc
-    return level, "Bonded", "Rare warmth beneath the snark."
-
-def update_bond(delta):
-    with _DB_LOCK, _db() as c:
-        r = c.execute("SELECT value FROM settings WHERE key='bond_level'").fetchone()
-        cur = int(r["value"]) if r else DEFAULTS["starting_bond"]
-        nv = max(0, min(100, cur + delta))
-        c.execute("UPDATE settings SET value=?,updated_at=datetime('now')WHERE key='bond_level'", (str(nv),))
-        c.commit()
-    return nv
-
-def get_recent_quirks(limit=5):
-    with _db() as c:
-        return [r["observation"] for r in c.execute("SELECT observation FROM quirks WHERE active=1 ORDER BY last_seen DESC LIMIT ?", (limit,)).fetchall()]
-
-def update_quirk(qtype, obs):
-    with _DB_LOCK, _db() as c:
-        ex = c.execute("SELECT quirk_id FROM quirks WHERE observation=? AND active=1", (obs,)).fetchone()
-        if ex: c.execute("UPDATE quirks SET times_seen=times_seen+1,last_seen=datetime('now')WHERE quirk_id=?", (ex["quirk_id"],))
-        else: c.execute("INSERT INTO quirks(quirk_type,observation)VALUES(?,?)", (qtype, obs))
-        c.commit()
-
-def log_interaction(module, user_input, response, sentiment=None, raw_question=None):
-    """Store interaction. For qa, raw_question stored separately to keep _similar() accurate."""
-    with _DB_LOCK, _db() as c:
-        rq = raw_question if module == "qa" and raw_question else None
-        c.execute("INSERT INTO interactions(module,user_input,grimalkin_response,sentiment,raw_question)VALUES(?,?,?,?,?)",
-                  (module, user_input, response, sentiment, rq))
-        total = c.execute("SELECT COUNT(*)as c FROM interactions").fetchone()["c"]
-        if total and total % DEFAULTS["milestone_every_n"] == 0:
-            cur = c.execute("SELECT value FROM settings WHERE key='bond_level'").fetchone()
-            nv = max(0, min(100, int(cur["value"]) + DEFAULTS["bond_per_milestone"]))
-            c.execute("UPDATE settings SET value=?,updated_at=datetime('now')WHERE key='bond_level'", (str(nv),))
-        c.commit()
-
-def remember_file(filename, orig, dest, category, fhash):
-    with _DB_LOCK, _db() as c:
-        ex = c.execute("SELECT file_id FROM file_memory WHERE file_hash=?", (fhash,)).fetchone()
-        if ex: c.execute("UPDATE file_memory SET times_seen=times_seen+1,last_seen=datetime('now'),sorted_path=?,category=? WHERE file_id=?", (dest, category, ex["file_id"]))
-        else: c.execute("INSERT INTO file_memory(filename,original_path,sorted_path,category,file_hash)VALUES(?,?,?,?,?)", (filename, orig, dest, category, fhash))
-        c.commit()
-
-def check_duplicate(fhash):
-    with _db() as c:
-        r = c.execute("SELECT filename FROM file_memory WHERE file_hash=?", (fhash,)).fetchone()
-    return r["filename"] if r else None
-
-def get_files_since(since):
-    with _db() as c:
-        return [dict(r) for r in c.execute("SELECT filename,category,first_seen FROM file_memory WHERE first_seen>? ORDER BY first_seen DESC", (since,)).fetchall()]
-
-def get_recent_queries(limit=10):
-    """Returns raw questions for qa (v2.1 fix: no longer diluted by FAISS context)."""
-    with _db() as c:
-        rows = c.execute("SELECT raw_question, user_input FROM interactions WHERE module='qa' ORDER BY timestamp DESC LIMIT ?", (limit,)).fetchall()
-    return [r["raw_question"] or r["user_input"] for r in rows]
-
-def get_vault_size():
-    with _db() as c: return c.execute("SELECT COUNT(*)as c FROM file_memory WHERE indexed=1").fetchone()["c"]
-
-def get_total_files():
-    with _db() as c: return c.execute("SELECT COUNT(*)as c FROM file_memory").fetchone()["c"]
-
-def get_unindexed_files():
-    with _db() as c:
-        return [dict(r) for r in c.execute("SELECT file_id, filename, sorted_path, category FROM file_memory WHERE indexed=0 AND sorted_path IS NOT NULL").fetchall()]
-
-def mark_files_indexed(file_ids):
-    if not file_ids: return
-    with _DB_LOCK, _db() as c:
-        c.executemany("UPDATE file_memory SET indexed=1 WHERE file_id=?", [(fid,) for fid in file_ids])
-        c.commit()
-
-# --- Custom categories (v2.1) ---
-def get_custom_categories() -> List[str]:
-    try: return json.loads(get_setting("custom_categories", "[]"))
-    except (json.JSONDecodeError, TypeError): return []
-
-def get_all_categories() -> List[str]:
-    seen = {}
-    return [x for x in BASE_CATEGORIES + get_custom_categories() if not (x in seen or seen.setdefault(x, 1))]
-
-def add_custom_category(name: str) -> bool:
-    """Sanitize, validate, persist a new category."""
-    if not name: return False
-    cat = re.sub(r'[^A-Z0-9_]', '', name.strip().upper())
-    if len(cat) < 2: return False
-    if cat in [c.upper() for c in get_all_categories()]: return False
-    customs = get_custom_categories()
-    if len(customs) >= MAX_CUSTOM_CATEGORIES: return False
-    customs.append(cat)
-    set_setting("custom_categories", json.dumps(customs))
-    ensure_dirs()
-    return True
+def get_setting(db, key, default=""):
+    cur = db.cursor()
+    cur.execute("SELECT value FROM settings WHERE key=?", (key,))
+    row = cur.fetchone()
+    return row[0] if row else default
 
 
-# --- Prompt builder ---
-def build_system_prompt(module):
-    if get_setting("serious_mode", "false") == "true":
-        s = MODULE_SUFFIXES.get(module, "")
-        return f"You are Grimalkin, a local file management assistant. Direct, dry professional tone. No cat behaviors.\n\nMODULE:\n{s}"
-    bl, bn, bd = get_bond_status()
-    quirks = get_recent_quirks(DEFAULTS["quirk_context_limit"])
-    qs = "\n".join(f"- {q}" for q in quirks) if quirks else "No quirks yet."
-    ua = get_setting("user_address", "my witch")
-    prompt = GRIMALKIN_SYSTEM_PROMPT.format(user_address=ua, bond_level=bl, bond_name=bn,
-                                            bond_description=bd, quirks_formatted=qs)
-    drifted = get_setting("drift_detected", "false") == "true"
-    if drifted: prompt += "\n" + FEW_SHOT_EXAMPLES
-    s = MODULE_SUFFIXES.get(module, "")
-    if s: prompt += f"\n\nMODULE:\n{s}"
-    if bl == 100:
-        prompt += "\nMAX_BOND: You may — very occasionally — show genuine warmth, then immediately deflect."
-    if 2 <= datetime.now().hour <= 4:
-        prompt += "\nLATE_NIGHT: The witch stirs at an ungodly hour. Comment once, with concern masked as annoyance."
-    if drifted:
-        prompt += DRIFT_RECOVERY
-        set_setting("drift_detected", "false")
-    return prompt
+def set_setting(db, key, value):
+    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+    db.commit()
 
 
-# --- LLM wrapper ---
-def call_llm(system, user, max_tokens=250):
-    if MODEL_CONFIG["backend"] == "openai": return _call_openai(system, user, max_tokens)
-    return _call_ollama(system, user, max_tokens)
+def get_bond_level(db) -> int:
+    return int(get_setting(db, "bond_level", "10"))
 
-def _call_ollama(system, user, mt):
+
+def increment_bond(db, amount=1):
+    level = min(100, get_bond_level(db) + amount)
+    set_setting(db, "bond_level", str(level))
+    return level
+
+
+def bond_title(level: int) -> str:
+    if level < 20:  return "Stranger"
+    if level < 40:  return "Acquaintance"
+    if level < 60:  return "Resident"
+    if level < 80:  return "Companion"
+    return "Bonded"
+
+
+# ─── Ollama Interface ─────────────────────────────────────────────────────────
+
+def ollama_chat(prompt: str, system: str = "", model: str = OLLAMA_MODEL) -> str:
+    if not HAS_REQUESTS:
+        return "Hrk. Hairball. The requests library is missing."
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
     try:
-        import ollama as pkg
-        r = pkg.chat(model=MODEL_CONFIG["chat_model"], messages=[{"role":"system","content":system},{"role":"user","content":user}],
-                     options={"num_predict":mt,"temperature":MODEL_CONFIG["temperature"]})
-        return r["message"]["content"].strip()
-    except ImportError:
-        return _call_ollama_http(system, user, mt)
-
-def _call_ollama_http(system, user, mt):
-    import urllib.request
-    payload = json.dumps({"model":MODEL_CONFIG["chat_model"],"messages":[{"role":"system","content":system},{"role":"user","content":user}],
-                          "options":{"num_predict":mt,"temperature":MODEL_CONFIG["temperature"]},"stream":False})
-    req = urllib.request.Request(f"{MODEL_CONFIG['base_url']}/api/chat", data=payload.encode(), headers={"Content-Type":"application/json"})
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        return json.loads(resp.read().decode())["message"]["content"].strip()
-
-def _call_openai(system, user, mt):
-    import urllib.request
-    payload = json.dumps({"model":MODEL_CONFIG["chat_model"],"messages":[{"role":"system","content":system},{"role":"user","content":user}],
-                          "max_tokens":mt,"temperature":MODEL_CONFIG["temperature"],"stream":False})
-    url = MODEL_CONFIG["base_url"].rstrip("/")
-    if "/v1/chat/completions" not in url:
-        url += "/chat/completions" if url.endswith("/v1") else "/v1/chat/completions"
-    req = urllib.request.Request(url, data=payload.encode(), headers={"Content-Type":"application/json"})
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        return json.loads(resp.read().decode())["choices"][0]["message"]["content"].strip()
-
-def scrub_corporate(response):
-    cleaned = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
-    drift = False
-    for p in _CORPORATE_PATTERNS:
-        cleaned, n = p.subn("", cleaned)
-        if n: drift = True
-    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
-    if drift:
-        set_setting("drift_detected", "true")
-        log.warning("Corporate drift scrubbed")
-    return cleaned
-
-def apply_serious(response):
-    if get_setting("serious_mode") != "true": return response
-    c = re.sub(r"\*[^*]+\*", "", response)
-    for s in ("Purr","purr","Hssst","hssst","Hrk","hrk","Meow","meow"): c = c.replace(s, "")
-    return re.sub(r"\s{2,}", " ", c).strip()
-
-def grimalkin_respond(module, user_input, max_tokens=None, raw_question=None):
-    """Main LLM entry point. Always safe — returns cat error on failure."""
-    mt = max_tokens or MODEL_CONFIG["max_tokens"].get(module, MODEL_CONFIG["max_tokens"]["default"])
-    try:
-        raw = call_llm(build_system_prompt(module), user_input, mt)
-        final = apply_serious(scrub_corporate(raw))
+        resp = requests.post(
+            f"{OLLAMA_URL}/api/chat",
+            json={"model": model, "messages": messages, "stream": False},
+            timeout=120,
+        )
+        resp.raise_for_status()
+        return resp.json().get("message", {}).get("content", "").strip()
     except Exception as e:
-        log.error(f"LLM failed ({module}): {e}")
-        final = OLLAMA_DOWN_MSG
-    if module not in ("classify_feedback", "classify_file"):
-        log_interaction(module, user_input, final, raw_question=raw_question)
-    return final
+        log.error(f"Ollama error: {e}")
+        return "Hrk. Hairball. Ollama is not responding."
 
 
-# --- Core modules ---
-_HUNT_LOCK = threading.Lock()
+PERSONA_SYSTEM = f"""You are Grimalkin, a digital cat familiar. Ancient, observant, slightly sardonic. 
+Never break character. Short precise sentences. Refer to human as 'mortal' or their address. 
+No corporate phrases. No emojis. Max {MAX_PERSONA_TOKENS} tokens.
+Files = prey, folders = territories, knowledge = threads in your web.
+ALWAYS base answers on provided context first. Never ignore context for training data.
+If context answers, use it. If not, say so honestly."""
 
-def hash_file(fp):
-    sz = Path(fp).stat().st_size
+
+def grimalkin_respond(prompt: str, context: str = "") -> str:
+    full_prompt = f"{context}\n\n{prompt}" if context else prompt
+    raw = ollama_chat(full_prompt, system=PERSONA_SYSTEM)
+    return scrub_corporate(raw)
+
+
+# ─── File Hashing & Classification ────────────────────────────────────────────
+
+def file_hash(filepath: Path) -> str:
     h = hashlib.sha256()
-    if sz > DEFAULTS["max_file_hash_mb"] * 1024 * 1024:
-        h.update(str(sz).encode())
-        with open(fp, "rb") as f:
-            h.update(f.read(8192)); f.seek(max(0, sz - 8192)); h.update(f.read(8192))
-    else:
-        with open(fp, "rb") as f:
-            for chunk in iter(lambda: f.read(8192), b""): h.update(chunk)
+    with open(filepath, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
     return h.hexdigest()
 
-def classify_file_heuristic(filename):
-    """Tier 1: instant by keyword then extension. Returns None if ambiguous."""
-    nl = filename.lower()
-    ext = Path(filename).suffix.lower()
-    for cat, kws in FILENAME_KEYWORD_MAP.items():
-        if any(kw in nl for kw in kws): return cat
-    for cat, exts in EXTENSION_MAP.items():
-        if ext in exts: return cat
-    return None
 
-def classify_file_llm(filename):
-    """Tier 2: LLM for ambiguous files. Includes custom categories dynamically."""
-    all_cats = get_all_categories() + ["misc"]
+def classify_file(filepath: Path, db=None) -> str:
+    ext = filepath.suffix.lower()
+    cat = EXTENSION_MAP.get(ext)
+    if cat:
+        return cat
+    if db:
+        customs = json.loads(get_setting(db, "custom_categories", "[]"))
+        for custom_cat in customs:
+            if ext in DEFAULT_CATEGORIES.get(custom_cat, []):
+                return custom_cat
+    return "MISC"
+
+
+# ─── Document Loading & Embedding ─────────────────────────────────────────────
+
+LOADER_MAP = {
+    ".pdf": PyPDFLoader,
+    ".csv": CSVLoader,
+    ".docx": UnstructuredWordDocumentLoader,
+    ".doc": UnstructuredWordDocumentLoader,
+    **{ext: TextLoader for ext in _TEXT_EXTS},
+}
+
+embeddings = OllamaEmbeddings(model=EMBED_MODEL, base_url=OLLAMA_URL)
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP
+)
+
+
+def load_and_chunk(filepath: Path) -> list:
+    ext = filepath.suffix.lower()
+    loader_cls = LOADER_MAP.get(ext)
+    if not loader_cls:
+        return []
     try:
-        r = call_llm(f"Classify into ONE category. ONLY the name.\nCategories: {', '.join(all_cats)}", f"Filename: {filename}", 30)
-        cat = r.strip().upper().split()[0]
-        for c in all_cats:
-            if c.upper() == cat: return c
-        return "misc"
-    except Exception:
-        return "misc"
-
-def classify_file(filename):
-    return classify_file_heuristic(filename) or classify_file_llm(filename)
-
-def run_hunt(downloads_path=None):
-    if not _HUNT_LOCK.acquire(blocking=False):
-        return "*tail lash* Already mid-Hunt. Wait."
-    try: return _execute_hunt(downloads_path)
-    finally: _HUNT_LOCK.release()
-
-def _execute_hunt(downloads_path=None):
-    hdir = Path(downloads_path) if downloads_path else WATCHED_DIR
-    if not hdir.exists():
-        return grimalkin_respond("error", f"Hunting Ground missing at {hdir}.")
-    files = [f for f in hdir.iterdir() if f.is_file() and not f.name.startswith(".")
-             and not f.name.endswith((".crdownload",".part",".tmp"))]
-    if not files:
-        return grimalkin_respond("sorter", "Hunting Ground empty. Zero files.")
-    sorted_f, dupes, errs, llm_n = {}, [], [], 0
-    hour = datetime.now().hour
-    for fp in files:
-        try:
-            fh = hash_file(str(fp))
-            if check_duplicate(fh):
-                dup_dest = SORTED_BASE / "DUPLICATES" / fp.name
-                if dup_dest.exists():
-                    dup_dest = SORTED_BASE / "DUPLICATES" / f"{fp.stem}_{int(time.time())}{fp.suffix}"
-                shutil.move(str(fp), str(dup_dest))
-                dupes.append(fp.name)
-                continue
-            h = classify_file_heuristic(fp.name)
-            cat = h or classify_file_llm(fp.name)
-            if not h: llm_n += 1
-            dd = SORTED_BASE / cat
-            dp = dd / fp.name
-            if dp.exists():
-                stem, suf, ctr = fp.stem, fp.suffix, 1
-                while dp.exists(): dp = dd / f"{stem}_{ctr}{suf}"; ctr += 1
-            shutil.move(str(fp), str(dp))
-            remember_file(fp.name, str(fp), str(dp), cat, fh)
-            sorted_f.setdefault(cat, []).append(fp.name)
-        except Exception as e:
-            log.error(f"Hunt err {fp.name}: {e}"); errs.append(f"{fp.name}: {str(e)[:80]}")
-    parts = [f"Files sorted: {sum(len(v) for v in sorted_f.values())}"]
-    for cat, names in sorted_f.items(): parts.append(f"  {cat}: {len(names)}")
-    if dupes: parts.append(f"Duplicates caught: {len(dupes)}")
-    if errs: parts.append(f"Errors: {len(errs)}")
-    if llm_n: parts.append(f"LLM-classified: {llm_n}")
-    if hour >= 23 or hour <= 4: parts.append(f"Time: {datetime.now().strftime('%I:%M %p')} (late)")
-    # Easter egg: file milestones
-    total = get_total_files()
-    if total > 0 and total % 100 == 0:
-        parts.append(f"MILESTONE: Page {total} now rests in the Vault. Every one remembered.")
-    report = grimalkin_respond("sorter", "Report this Hunt:\n" + "\n".join(parts))
-    if hour >= 23 or hour <= 4:
-        update_quirk("time_pattern", f"Saves files late ({datetime.now().strftime('%I:%M %p')})")
-    return report
+        loader = loader_cls(str(filepath))
+        docs = loader.load()
+        chunks = text_splitter.split_documents(docs)
+        for chunk in chunks:
+            chunk.metadata["filename"] = filepath.name
+            chunk.metadata["source_path"] = str(filepath)
+        return chunks
+    except Exception as e:
+        log.warning(f"Failed to load {filepath.name}: {e}")
+        return []
 
 
-# --- Nightly groom: batch tags + notes (v2.1) ---
-def _safe_read_snippet(path_str, limit):
-    """Read up to limit chars from a text file. Empty string on any failure."""
+# ─── FAISS Index Management ───────────────────────────────────────────────────
+
+FAISS_DIM = 768
+FAISS_INDEX_PATH = FAISS_INDEX_DIR / "index.faiss"
+FAISS_META_PATH = FAISS_INDEX_DIR / "metadata.json"
+
+
+def init_faiss():
+    if FAISS_INDEX_PATH.exists() and FAISS_META_PATH.exists():
+        index = faiss.read_index(str(FAISS_INDEX_PATH))
+        with open(FAISS_META_PATH) as f:
+            metadata = json.load(f)
+    else:
+        index = faiss.IndexFlatL2(FAISS_DIM)
+        metadata = []
+    return index, metadata
+
+
+def save_faiss(index, metadata):
+    faiss.write_index(index, str(FAISS_INDEX_PATH))
+    with open(FAISS_META_PATH, "w") as f:
+        json.dump(metadata, f)
+
+
+def index_chunks(index, metadata, chunks: list) -> int:
+    if not chunks:
+        return 0
+    texts = [c.page_content for c in chunks]
     try:
-        fp = Path(path_str)
-        if fp.suffix.lower() not in INDEXABLE_EXTENSIONS or not fp.exists(): return ""
-        return fp.read_text(encoding="utf-8", errors="ignore")[:limit]
-    except Exception:
+        vecs = embeddings.embed_documents(texts)
+        arr = np.array(vecs, dtype=np.float32)
+        new_meta = [{
+            "filename": c.metadata.get("filename", ""),
+            "source_path": c.metadata.get("source_path", ""),
+            "text": c.page_content[:500],
+        } for c in chunks]
+        index.add(arr)
+        metadata.extend(new_meta)
+        return len(chunks)
+    except Exception as e:
+        log.error(f"Embedding failed: {e}")
+        return 0
+
+
+def faiss_search(index, metadata, query: str, k: int = 5) -> list[dict]:
+    if index.ntotal == 0:
+        return []
+    try:
+        vec = np.array(embeddings.embed_query(query), dtype=np.float32).reshape(1, -1)
+        distances, indices = index.search(vec, min(k, index.ntotal))
+        results = []
+        for dist, idx in zip(distances[0], indices[0]):
+            if 0 <= idx < len(metadata):
+                result = dict(metadata[idx])
+                result["score"] = float(dist)
+                results.append(result)
+        return results
+    except Exception as e:
+        log.error(f"FAISS search failed: {e}")
+        return []
+
+
+# ─── Hybrid Search (keyword blindness fix) ────────────────────────────────────
+
+def keyword_search(db, query: str, limit: int = 10) -> set[str]:
+    """Multi-term OR keyword boost on filename/notes/tags."""
+    terms = [w.strip() for w in query.strip().split() if len(w.strip()) >= 2]
+    if not terms:
+        return set()
+    cur = db.cursor()
+    clauses = []
+    params = []
+    for t in terms:
+        like = f"%{t}%"
+        clauses.append("(filename LIKE ? OR notes LIKE ? OR tags LIKE ?)")
+        params.extend([like, like, like])
+    sql = f"""
+        SELECT DISTINCT filename FROM file_memory 
+        WHERE burned_at IS NULL AND indexed = 1
+        AND ({" OR ".join(clauses)})
+        LIMIT ?
+    """
+    params.append(limit)
+    cur.execute(sql, params)
+    return {row[0] for row in cur.fetchall()}
+
+
+def hybrid_vault_rag(db, index, metadata, query: str) -> str:
+    """Hybrid keyword + semantic RAG."""
+    results = faiss_search(index, metadata, query, k=15)
+    cur = db.cursor()
+    valid = []
+    for r in results:
+        cur.execute("SELECT burned_at FROM file_memory WHERE filename=?", (r.get("filename"),))
+        row = cur.fetchone()
+        if not row:
+            continue  # cremated or unknown — no file_memory row, skip ghost vector
+        if row[0]:
+            continue  # burned but not yet cremated, skip
+        valid.append(r)
+
+    kw_fns = keyword_search(db, query)
+    boosted = []
+    seen = set()
+    for r in valid:
+        fn = r.get("filename", "")
+        if fn in seen:
+            continue
+        seen.add(fn)
+        if fn in kw_fns:
+            r["score"] = r.get("score", 1.0) * 0.3
+        boosted.append(r)
+
+    for fn in kw_fns:
+        if fn not in seen:
+            # Pull actual chunk text from FAISS metadata for this file
+            file_chunks = [m["text"] for m in metadata if m.get("filename") == fn][:2]
+            chunk_text = "\n".join(file_chunks) if file_chunks else f"(keyword match, no chunks: {fn})"
+            boosted.append({"filename": fn, "text": chunk_text, "score": 0.1})
+            seen.add(fn)
+
+    if not boosted:
+        return grimalkin_respond(query, context="The vault is empty.")
+
+    boosted.sort(key=lambda x: x.get("score", 1.0))
+    context_parts = []
+
+    g = graph_query(db, query)
+    if g:
+        context_parts.append(f"My web shows these connections:\n{g}")
+
+    doc_parts = [f"[{r['filename']}] {r.get('text', '')}" for r in boosted[:7]]
+    if doc_parts:
+        context_parts.append("From my vault:\n" + "\n---\n".join(doc_parts))
+
+    context = "\n\n".join(context_parts)
+    return grimalkin_respond(query, context=context)
+
+
+# ─── The Hunt (File Sorting) ──────────────────────────────────────────────────
+
+def scan_hunting_grounds(db) -> list[Path]:
+    if not HUNTING_GROUNDS.exists():
+        return []
+    cur = db.cursor()
+    cur.execute("SELECT file_hash FROM file_memory")
+    known_hashes = {row[0] for row in cur.fetchall()}
+    new_files = []
+    for f in HUNTING_GROUNDS.iterdir():
+        if f.is_file() and not f.name.startswith("."):
+            try:
+                fh = file_hash(f)
+                if fh not in known_hashes:
+                    new_files.append(f)
+            except Exception:
+                pass
+    return new_files
+
+
+def sort_file(db, index, metadata, filepath: Path, defer_save: bool = False) -> dict:
+    """Sort single file. defer_save for batch hunts."""
+    fh = file_hash(filepath)
+    category = classify_file(filepath, db)
+    dest_dir = SORTED_BASE / category
+    dest_dir.mkdir(exist_ok=True)
+    dest_path = dest_dir / filepath.name
+
+    if dest_path.exists():
+        stem = filepath.stem
+        suffix = filepath.suffix
+        counter = 1
+        while dest_path.exists():
+            dest_path = dest_dir / f"{stem}_{counter}{suffix}"
+            counter += 1
+
+    try:
+        shutil.copy2(str(filepath), str(dest_path))
+    except Exception as e:
+        log.error(f"Copy failed for {filepath.name}: {e}")
+        return {"filename": filepath.name, "status": "error", "error": str(e)}
+
+    chunks = load_and_chunk(dest_path)
+    indexed_count = index_chunks(index, metadata, chunks)
+    indexed = 1 if indexed_count > 0 else 0
+
+    db.execute("""
+        INSERT OR IGNORE INTO file_memory 
+        (filename, original_path, sorted_path, category, file_hash, indexed)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (dest_path.name, str(filepath), str(dest_path), category, fh, indexed))
+    db.commit()
+
+    if indexed and not defer_save:
+        save_faiss(index, metadata)
+
+    return {
+        "filename": dest_path.name,
+        "category": category,
+        "indexed": indexed,
+        "chunks": indexed_count,
+        "status": "sorted",
+    }
+
+
+def run_hunt(db, index, metadata) -> list[dict]:
+    """Full hunt with single FAISS save at end."""
+    new_files = scan_hunting_grounds(db)
+    if not new_files:
+        return []
+    results = []
+    any_indexed = False
+    for f in new_files:
+        result = sort_file(db, index, metadata, f, defer_save=True)
+        results.append(result)
+        if result.get("indexed"):
+            any_indexed = True
+        log.info(f"Sorted: {result['filename']} → {result.get('category', '?')}")
+    if any_indexed:
+        save_faiss(index, metadata)
+    return results
+
+
+# ─── JSON Repair Helper ───────────────────────────────────────────────────────
+
+def repair_json(raw: str) -> dict:
+    raw = re.sub(r'```json\s*|\s*```', '', raw, flags=re.IGNORECASE)
+    raw = re.sub(r'^.*?(?=[\[{])', '', raw, count=1, flags=re.DOTALL)
+    raw = raw.strip()
+    raw = re.sub(r',\s*([}\]])', r'\1', raw)
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict) and "files" in data:
+            return data
+        if isinstance(data, list):
+            return {"files": data}
+        return {"files": []}
+    except json.JSONDecodeError:
+        return {"files": []}
+
+
+def parse_groom_response(response: str) -> list[dict]:
+    data = repair_json(response)
+    results = []
+    for entry in data.get("files", []):
+        results.append({
+            "filename": entry.get("filename", ""),
+            "tags": entry.get("tags", []),
+            "note": entry.get("note", ""),
+            "entities": entry.get("entities", []),
+            "relations": entry.get("relations", []),
+        })
+    return results
+
+
+# ─── The Pyre ──────────────────────────────────────────────────────────────────
+
+def list_burnable_files(db) -> list[dict]:
+    cur = db.cursor()
+    cur.execute("""
+        SELECT filename, category, tags, notes, file_hash
+        FROM file_memory
+        WHERE burned_at IS NULL AND indexed = 1
+        ORDER BY rowid DESC
+    """)
+    cols = [c[0] for c in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def check_burn_allowed(db, bond_level: int) -> tuple:
+    if bond_level < 30:
+        return False, "We are still strangers. I will not unmake what you barely know."
+    cur = db.cursor()
+    cur.execute("SELECT value FROM settings WHERE key='burn_timestamps'")
+    row = cur.fetchone()
+    ts_str = row[0] if row else "[]"
+    ts = json.loads(ts_str)
+    now = datetime.now(timezone.utc)
+    recent = [
+        t for t in ts
+        if (now - datetime.fromisoformat(t.replace("Z", "+00:00"))).total_seconds() < 86400
+    ]
+    if len(recent) >= 5:
+        return False, "The pyre has been fed enough today. Return when the coals have cooled."
+    return True, ""
+
+
+def perform_ritual(db, file_hash_val: str, typed_name: str, bond_level: int) -> tuple:
+    allowed, msg = check_burn_allowed(db, bond_level)
+    if not allowed:
+        return False, msg
+    cur = db.cursor()
+    cur.execute("SELECT filename FROM file_memory WHERE file_hash=? AND burned_at IS NULL",
+                (file_hash_val,))
+    row = cur.fetchone()
+    if not row or row[0] != typed_name.strip():
+        return False, "The name you spoke does not match the offering."
+    return True, f"You would feed *{typed_name}* to the flames?"
+
+
+def execute_burn(db, file_hash_val: str) -> str:
+    cur = db.cursor()
+    cur.execute("SELECT filename, sorted_path, category FROM file_memory WHERE file_hash=?",
+                (file_hash_val,))
+    row = cur.fetchone()
+    if not row:
+        return "Hrk. The offering has already vanished."
+    filename, src_path, category = row
+    pyre_path = SORTED_BASE / "PYRE" / filename
+    try:
+        if Path(src_path).exists():
+            shutil.move(str(src_path), str(pyre_path))
+        cur.execute("UPDATE file_memory SET burned_at=? WHERE file_hash=?",
+                     (datetime.now(timezone.utc).isoformat(), file_hash_val))
+        cur.execute("SELECT value FROM settings WHERE key='burn_timestamps'")
+        row = cur.fetchone()
+        ts = json.loads(row[0] if row else "[]")
+        ts.append(datetime.now(timezone.utc).isoformat())
+        cur.execute("UPDATE settings SET value=? WHERE key='burn_timestamps'",
+                     (json.dumps(ts[-20:]),))
+        cur.execute("UPDATE settings SET value=CAST(value AS INTEGER)+1 WHERE key='burn_count'")
+        cur.execute(
+            "INSERT INTO interactions (module, user_input, grimalkin_response, sentiment) "
+            "VALUES ('pyre', ?, ?, 'burn')",
+            (filename, f"Burned {filename} to the pyre.")
+        )
+        db.commit()
+        burn_count = int(get_setting(db, "burn_count", "0"))
+        log.info(f"Burned: {filename} (total: {burn_count})")
+        return f"The pyre is lit. *{filename}* returns to dust. This makes {burn_count} offerings."
+    except Exception as e:
+        log.error(f"Burn failed for {filename}: {e}")
+        return "The flames refuse this offering… the file resists. Check the logs."
+
+
+def unburn(db, file_hash_val: str) -> str:
+    cur = db.cursor()
+    cur.execute("SELECT filename, category FROM file_memory WHERE file_hash=? AND burned_at IS NOT NULL",
+                (file_hash_val,))
+    row = cur.fetchone()
+    if not row:
+        return "That offering was never burned… or the ashes have already cooled."
+    filename, category = row
+    pyre_path = SORTED_BASE / "PYRE" / filename
+    restore_path = SORTED_BASE / category / filename
+    if not pyre_path.exists():
+        return "The ashes have cooled beyond recovery."
+    try:
+        shutil.move(str(pyre_path), str(restore_path))
+        cur.execute("UPDATE file_memory SET burned_at=NULL WHERE file_hash=?", (file_hash_val,))
+        cur.execute(
+            "INSERT INTO interactions (module, user_input, grimalkin_response, sentiment) "
+            "VALUES ('pyre', ?, ?, 'unburn')",
+            (filename, f"Pulled {filename} from the pyre.")
+        )
+        db.commit()
+        log.info(f"Unburned: {filename} → {restore_path}")
+        return f"The ashes still smoldered. *{filename}* has been pulled from the flames."
+    except Exception as e:
+        log.error(f"Unburn failed for {filename}: {e}")
+        return "Hrk. The pyre will not release its prey so easily."
+
+
+def cleanup_old_ashes(db):
+    cur = db.cursor()
+    cur.execute("""
+        SELECT file_hash, filename FROM file_memory
+        WHERE burned_at IS NOT NULL
+        AND burned_at < datetime('now', '-7 days')
+    """)
+    ashes = cur.fetchall()
+    for fh, fn in ashes:
+        pyre_path = SORTED_BASE / "PYRE" / fn
+        if pyre_path.exists():
+            try:
+                pyre_path.unlink()
+                cur.execute("DELETE FROM file_memory WHERE file_hash=?", (fh,))
+                cur.execute(
+                    "INSERT INTO interactions (module, user_input, grimalkin_response, sentiment) "
+                    "VALUES ('pyre', 'cleanup', ?, 'cremated')",
+                    (f"Cremated {fn}",)
+                )
+                log.info(f"Cremated permanently: {fn}")
+            except Exception as e:
+                log.error(f"Cremation failed for {fn}: {e}")
+    if ashes:
+        db.commit()
+
+
+# ─── The Web (Knowledge Graph) ────────────────────────────────────────────────
+
+STOPWORDS = frozenset({
+    "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
+    "of", "with", "by", "from", "up", "about", "into", "over", "after",
+    "what", "who", "how", "is", "are", "was", "were", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "not", "no", "nor", "so",
+    "than", "too", "very", "just", "only", "own", "same", "that", "this",
+    "these", "those", "then", "there", "here", "where", "when", "why",
+    "all", "each", "every", "both", "few", "more", "most", "other",
+    "some", "such", "any", "its", "my", "your", "his", "her", "our",
+    "their", "which", "whom", "whose", "if", "because", "as", "until",
+    "while", "also", "between", "through", "during", "before",
+    "connects", "connect", "link", "linked", "related", "thread",
+    "web", "ties", "find", "show", "tell", "know", "file", "files",
+})
+
+GROOM_COMBINED_SUFFIX = """
+Process these files and return **ONLY** valid JSON. No explanations, no markdown.
+
+{
+  "files": [
+    {
+      "filename": "example.pdf",
+      "tags": ["invoice", "q3"],
+      "note": "This smells of deadlines and quiet desperation.",
+      "entities": [
+        {"name": "Acme Corp", "type": "org"},
+        {"name": "2024-07-15", "type": "date"}
+      ],
+      "relations": [
+        {"src": "Acme Corp", "tgt": "2024-07-15", "type": "precedes"}
+      ]
+    }
+  ]
+}
+
+Rules:
+- tags: 1-3 lowercase keywords
+- note: 1-2 sentences, cat voice, specific
+- entities: 3-8 max, real names/orgs/dates/amounts/locations/topics
+- relations: only what the text justifies; src/tgt must be in entities
+- If unreadable: empty arrays
+"""
+
+
+def ingest_entities(db, filename: str, entities: list):
+    cur = db.cursor()
+    for e in entities:
+        name = e.get("name", "").strip()
+        if not name:
+            continue
+        cur.execute("""
+            INSERT INTO entities (name, type, first_seen)
+            VALUES (?, ?, date('now'))
+            ON CONFLICT(name) DO UPDATE SET times_seen = times_seen + 1
+        """, (name, e.get("type", "topic")))
+    db.commit()
+
+
+def ingest_relationships(db, filename: str, relations: list):
+    cur = db.cursor()
+    for r in relations:
+        src_name = r.get("src", "").strip()
+        tgt_name = r.get("tgt", "").strip()
+        if not src_name or not tgt_name:
+            continue
+        cur.execute("SELECT id FROM entities WHERE name=?", (src_name,))
+        src = cur.fetchone()
+        cur.execute("SELECT id FROM entities WHERE name=?", (tgt_name,))
+        tgt = cur.fetchone()
+        if not src or not tgt:
+            continue
+        cur.execute("""
+            INSERT OR IGNORE INTO relationships
+            (source_id, target_id, relation_type, source_file, seen)
+            VALUES (?, ?, ?, ?, date('now'))
+        """, (src[0], tgt[0], r.get("type", "mentioned_with"), filename))
+    db.commit()
+
+
+def graph_query(db, query: str) -> str:
+    words = [w for w in re.findall(r'\b\w+\b', query) if len(w) >= 3 and w.lower() not in STOPWORDS]
+    if not words:
+        return ""
+    cur = db.cursor()
+    summaries = []
+    seen_edges = set()
+    for w in set(words):
+        cur.execute("SELECT id, name, type FROM entities WHERE name LIKE ? LIMIT 5", (f"%{w}%",))
+        for eid, name, etype in cur.fetchall():
+            cur.execute("""
+                SELECT r.relation_type, e2.name, r.source_file
+                FROM relationships r
+                JOIN entities e2 ON r.target_id = e2.id
+                WHERE r.source_id = ?
+                ORDER BY r.seen DESC LIMIT 3
+            """, (eid,))
+            for rel, tgt, srcf in cur.fetchall():
+                edge_key = (name, rel, tgt)
+                if edge_key not in seen_edges:
+                    summaries.append(f"• {name} ({etype}) → {rel} → {tgt} [from {srcf}]")
+                    seen_edges.add(edge_key)
+            cur.execute("""
+                SELECT r.relation_type, e2.name, r.source_file
+                FROM relationships r
+                JOIN entities e2 ON r.source_id = e2.id
+                WHERE r.target_id = ?
+                ORDER BY r.seen DESC LIMIT 3
+            """, (eid,))
+            for rel, src, srcf in cur.fetchall():
+                edge_key = (src, rel, name)
+                if edge_key not in seen_edges:
+                    summaries.append(f"• {src} → {rel} → {name} ({etype}) [from {srcf}]")
+                    seen_edges.add(edge_key)
+    return "\n".join(summaries[:8]) or ""
+
+
+def graph_stats(db) -> dict:
+    cur = db.cursor()
+    entity_count = cur.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+    rel_count = cur.execute("SELECT COUNT(*) FROM relationships").fetchone()[0]
+    return {"entities": entity_count, "relationships": rel_count}
+
+
+# ─── The Loom — Living Graph Visualization ────────────────────────────────────
+
+def spring_layout(nodes: list[str], edges: list[tuple], iterations: int = 50) -> dict:
+    n = len(nodes)
+    if n == 0:
+        return {}
+    if n == 1:
+        return {nodes[0]: (0.5, 0.5)}
+    idx_map = {name: i for i, name in enumerate(nodes)}
+    pos = np.random.rand(n, 2) * 2 - 1
+
+    k = 0.05
+    for _ in range(iterations):
+        force = np.zeros((n, 2))
+        for i in range(n):
+            for j in range(i + 1, n):
+                delta = pos[i] - pos[j]
+                dist = max(np.linalg.norm(delta), 1e-4)
+                f = (k ** 2 / dist ** 2) * (delta / dist)
+                force[i] += f
+                force[j] -= f
+        for src, tgt in edges:
+            if src in idx_map and tgt in idx_map:
+                i = idx_map[src]
+                j = idx_map[tgt]
+                delta = pos[j] - pos[i]
+                dist = max(np.linalg.norm(delta), 1e-4)
+                f = (dist / k) * (delta / dist) * 0.08
+                force[i] += f
+                force[j] -= f
+        pos += force * 0.8
+        pos = np.clip(pos, -1.2, 1.2)
+    pos = (pos - pos.min(0)) / (pos.max(0) - pos.min(0) + 1e-6)
+    return {name: (float(p[0]), float(p[1])) for name, p in zip(nodes, pos)}
+
+
+def build_loom_data(db, filter_type: str = None, search_term: str = "") -> dict:
+    cur = db.cursor()
+    where = []
+    params = []
+    if filter_type and filter_type != "All":
+        where.append("type = ?")
+        params.append(filter_type)
+    if search_term:
+        where.append("name LIKE ?")
+        params.append(f"%{search_term}%")
+    where_clause = " WHERE " + " AND ".join(where) if where else ""
+    cur.execute(f"SELECT name, type, times_seen, importance FROM entities{where_clause} ORDER BY times_seen DESC LIMIT 500")
+    nodes_raw = cur.fetchall()
+    nodes = [{"id": n[0], "type": n[1], "size": min(40, max(8, n[2] * 1.5)), "imp": n[3]} for n in nodes_raw]
+    node_names = [n["id"] for n in nodes]
+
+    if not node_names:
+        return {"nodes": nodes, "edges": [], "stats": {"nodes": 0, "edges": 0}}
+
+    cur.execute("""
+        SELECT e1.name, e2.name, r.relation_type, COUNT(*) as strength
+        FROM relationships r
+        JOIN entities e1 ON r.source_id = e1.id
+        JOIN entities e2 ON r.target_id = e2.id
+        WHERE e1.name IN ({}) AND e2.name IN ({})
+        GROUP BY e1.name, e2.name, r.relation_type
+    """.format(",".join(["?"] * len(node_names)), ",".join(["?"] * len(node_names))),
+        node_names + node_names)
+    edges = [(row[0], row[1], row[2]) for row in cur.fetchall()]
+
+    return {"nodes": nodes, "edges": edges, "stats": {"nodes": len(nodes), "edges": len(edges)}}
+
+
+def build_loom_figure(db, filter_type: str = None, search_term: str = ""):
+    data = build_loom_data(db, filter_type, search_term)
+    if not data["nodes"]:
+        if HAS_PLOTLY:
+            fig = go.Figure()
+            fig.add_annotation(text="The Loom is bare.<br>Bring me files and I shall spin.", showarrow=False, font=dict(size=18))
+            fig.update_layout(template="plotly_dark", height=600)
+            return fig
+        return "<div style='padding:40px;text-align:center;font-size:1.3em;color:#666'>The Loom is bare. Bring me files and I shall spin.</div>"
+
+    nodes = data["nodes"]
+    edges = data["edges"]
+    node_names = [n["id"] for n in nodes]
+    pos = spring_layout(node_names, [(e[0], e[1]) for e in edges])
+
+    if HAS_PLOTLY:
+        edge_x, edge_y = [], []
+        for src, tgt, _ in edges:
+            if src in pos and tgt in pos:
+                x0, y0 = pos[src]
+                x1, y1 = pos[tgt]
+                edge_x.extend([x0, x1, None])
+                edge_y.extend([y0, y1, None])
+
+        node_x = [pos[n["id"]][0] for n in nodes]
+        node_y = [pos[n["id"]][1] for n in nodes]
+        node_size = [n["size"] for n in nodes]
+        color_map = {"person":"#00ffcc","org":"#ff6b6b","date":"#ffd93d","location":"#6bcbff","amount":"#ff9ff3","topic":"#a29bfe"}
+        node_color = [color_map.get(n["type"], "#888") for n in nodes]
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=edge_x, y=edge_y, mode='lines', line=dict(color='#555', width=1), hoverinfo='none'))
+        fig.add_trace(go.Scatter(
+            x=node_x, y=node_y,
+            mode='markers+text',
+            marker=dict(size=node_size, color=node_color, line=dict(width=2, color='#000')),
+            text=node_names,
+            textposition="top center",
+            hovertext=[f"{n['id']} ({n['type']}) — seen {n['size']//1.5}×" for n in nodes],
+            customdata=node_names
+        ))
+        fig.update_layout(
+            title="The Loom — Threads of Knowledge",
+            showlegend=False,
+            plot_bgcolor="#111",
+            paper_bgcolor="#111",
+            font_color="#ccc",
+            height=620,
+            margin=dict(l=20, r=20, t=40, b=20),
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
+        )
+        return fig
+
+    # HTML fallback
+    html = "<div style='padding:20px;font-family:monospace'><h3>The Loom (static view)</h3><ul>"
+    for n in nodes[:30]:
+        html += f"<li><b>{n['id']}</b> ({n['type']}) — {n['size']//1.5}×</li>"
+    html += "</ul>"
+    if len(nodes) > 30:
+        html += f"<p>…and {len(nodes)-30} more threads.</p>"
+    html += "</div>"
+    return html
+
+
+def describe_node(db, entity_name: str) -> str:
+    cur = db.cursor()
+    cur.execute("SELECT type, times_seen FROM entities WHERE name=?", (entity_name,))
+    row = cur.fetchone()
+    if not row:
+        return "I do not know this name yet."
+    etype, times = row
+    cur.execute("""
+        SELECT r.relation_type, e2.name, r.source_file
+        FROM relationships r JOIN entities e2 ON r.target_id = e2.id
+        WHERE r.source_id = (SELECT id FROM entities WHERE name=?)
+        UNION
+        SELECT r.relation_type, e1.name, r.source_file
+        FROM relationships r JOIN entities e1 ON r.source_id = e1.id
+        WHERE r.target_id = (SELECT id FROM entities WHERE name=?)
+        LIMIT 12
+    """, (entity_name, entity_name))
+    threads = cur.fetchall()
+    if not threads:
+        return f"* {entity_name} ({etype}) stands alone so far. {times} sightings."
+    lines = [f"Seven threads radiate from *{entity_name}* ({etype})."]
+    for rel, tgt, srcf in threads[:6]:
+        lines.append(f"• {rel} → {tgt} [from {srcf}]")
+    lines.append("The densest knot binds it to your most important prey.")
+    return "\n".join(lines)
+
+
+def find_clusters(db, top_n: int = 5) -> str:
+    cur = db.cursor()
+    cur.execute("""
+        SELECT e1.name, e2.name, COUNT(*) as strength
+        FROM relationships r
+        JOIN entities e1 ON r.source_id = e1.id
+        JOIN entities e2 ON r.target_id = e2.id
+        GROUP BY e1.name, e2.name
+        ORDER BY strength DESC LIMIT ?
+    """, (top_n * 3,))
+    clusters = cur.fetchall()
+    if not clusters:
+        return "No knots yet. The web is young."
+    lines = [f"Seventeen names dance in a single knot. Shall I name the dancers?"]
+    for i, (a, b, s) in enumerate(clusters[:top_n], 1):
+        lines.append(f"• Cluster {i}: *{a}* ↔ *{b}* ({s} threads)")
+    return "\n".join(lines)
+
+
+def export_loom_markdown(db) -> Path:
+    today = date.today().isoformat()
+    path = SORTED_BASE / f"loom_export_{today}.md"
+    cur = db.cursor()
+    cur.execute("SELECT name, type, times_seen FROM entities ORDER BY times_seen DESC")
+    entities = cur.fetchall()
+    cur.execute("SELECT e1.name, r.relation_type, e2.name FROM relationships r JOIN entities e1 ON r.source_id=e1.id JOIN entities e2 ON r.target_id=e2.id")
+    rels = cur.fetchall()
+
+    md = ["# Grimalkin Loom Export — " + today, ""]
+    md.append("## Entities")
+    for t in ["person","org","date","location","amount","topic"]:
+        md.append(f"### {t.upper()}")
+        for name, etype, cnt in [e for e in entities if e[1] == t]:
+            md.append(f"- **{name}** ({cnt}×)")
+    md.append("\n## Relationships (adjacency)")
+    for a, rel, b in rels:
+        md.append(f"- {a} —**{rel}**→ {b}")
+    md.append(f"\nExported {len(entities)} entities, {len(rels)} threads.")
+    path.write_text("\n".join(md), encoding="utf-8")
+    return path
+
+
+# ─── The Mirror ───────────────────────────────────────────────────────────────
+
+def generate_weekly_reflection(db) -> str:
+    today = date.today()
+    cur = db.cursor()
+    cur.execute("SELECT MAX(reflection_date) FROM reflections")
+    last = cur.fetchone()[0]
+    if last and (today - date.fromisoformat(last)).days < 7:
         return ""
 
-def run_nightly_groom():
-    """Batch tag and annotate files. Notes require bond >= 50 (Resident)."""
-    bl, _, _ = get_bond_status()
-    do_notes = bl >= 50
-    with _db() as c:
-        cond = "tags IS NULL" + (" OR notes IS NULL" if do_notes else "")
-        files = [dict(r) for r in c.execute(
-            f"SELECT file_id, filename, category, sorted_path FROM file_memory WHERE {cond} LIMIT 40"
-        ).fetchall()]
-    if not files:
-        return "The Vault is already perfectly groomed. *licks paw*"
-    batch_size = DEFAULTS["groom_batch_size"]
-    updates = 0
-    for i in range(0, len(files), batch_size):
-        batch = files[i:i + batch_size]
-        context = "Groom these files:\n" + "\n---\n".join(
-            f"FILE: {f['filename']} | CAT: {f['category']} | SNIP: {_safe_read_snippet(f['sorted_path'], DEFAULTS['groom_content_limit']) or '(binary)'}"
-            for f in batch)
+    cur.execute("SELECT COUNT(*) FROM file_memory WHERE burned_at IS NULL")
+    total = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(DISTINCT date(created_at)) FROM file_memory WHERE created_at >= date('now','-7 days')")
+    active_days = cur.fetchone()[0] or 1
+    stats = graph_stats(db)
+    top_entities = cur.execute("SELECT name FROM entities ORDER BY times_seen DESC LIMIT 3").fetchall()
+    top_names = ", ".join([n[0] for n in top_entities])
+
+    prompt = f"""Seven days have passed in the vault.
+Total prey: {total}
+Active days: {active_days}
+Web: {stats['entities']} names, {stats['relationships']} threads
+Top entities: {top_names}
+
+Write a 2-3 sentence reflection in Grimalkin's sardonic cat voice. End with a personal note on our bond."""
+
+    summary = ollama_chat(prompt, system=PERSONA_SYSTEM)
+    summary = scrub_corporate(summary)
+
+    key_entities = json.dumps([n[0] for n in top_entities])
+    cur.execute("""
+        INSERT OR REPLACE INTO reflections (reflection_date, summary, key_entities)
+        VALUES (?, ?, ?)
+    """, (today.isoformat(), summary, key_entities))
+    db.commit()
+    log.info("Weekly reflection woven.")
+    return summary
+
+
+def merge_entity(db, name_keep: str, name_delete: str) -> str:
+    cur = db.cursor()
+    cur.execute("SELECT id, times_seen FROM entities WHERE name=?", (name_keep,))
+    keep = cur.fetchone()
+    cur.execute("SELECT id, times_seen FROM entities WHERE name=?", (name_delete,))
+    delete = cur.fetchone()
+    if not keep or not delete:
+        return "One of those shadows does not exist in my web."
+    if keep[0] == delete[0]:
+        return "They are already one."
+
+    keeper_id, keeper_ts = keep
+    delete_id, delete_ts = delete
+    if delete_ts > keeper_ts:
+        keeper_id, delete_id = delete_id, keeper_id
+        name_keep, name_delete = name_delete, name_keep
+
+    cur.execute("UPDATE relationships SET source_id=? WHERE source_id=?", (keeper_id, delete_id))
+    cur.execute("UPDATE relationships SET target_id=? WHERE target_id=?", (keeper_id, delete_id))
+    cur.execute("UPDATE entities SET times_seen = times_seen + ? WHERE id=?", (delete_ts, keeper_id))
+    cur.execute("DELETE FROM entities WHERE id=?", (delete_id,))
+    cur.execute("""
+        DELETE FROM relationships WHERE rowid NOT IN (
+            SELECT MIN(rowid) FROM relationships 
+            GROUP BY source_id, target_id, relation_type, source_file
+        )
+    """)
+    cur.execute("DELETE FROM relationships WHERE source_id = target_id")
+    db.commit()
+    return f"The two shadows are now one. *{name_keep}* stands stronger. The web is cleaner."
+
+
+def set_entity_importance(db, entity_name: str, important: bool) -> str:
+    cur = db.cursor()
+    cur.execute("UPDATE entities SET importance=? WHERE name=?", (1 if important else 0, entity_name))
+    if cur.rowcount == 0:
+        return "I do not know this name."
+    db.commit()
+    return f"I shall watch *{entity_name}* {'closely' if important else 'less intently'}."
+
+
+def forget_entity(db, entity_name: str) -> str:
+    cur = db.cursor()
+    cur.execute("SELECT id FROM entities WHERE name=?", (entity_name,))
+    row = cur.fetchone()
+    if not row:
+        return "That name was never here."
+    eid = row[0]
+    cur.execute("DELETE FROM relationships WHERE source_id=? OR target_id=?", (eid, eid))
+    cur.execute("DELETE FROM entities WHERE id=?", (eid,))
+    db.commit()
+    return f"The name dissolves. The threads fall away. *{entity_name}* was never here."
+
+
+def list_top_entities(db, limit: int = 20) -> str:
+    cur = db.cursor()
+    cur.execute("SELECT name, type, times_seen, importance FROM entities ORDER BY times_seen DESC LIMIT ?", (limit,))
+    rows = cur.fetchall()
+    lines = ["Top threads in my web:"]
+    for name, etype, ts, imp in rows:
+        star = " ★" if imp else ""
+        lines.append(f"• *{name}* ({etype}) — {ts}×{star}")
+    return "\n".join(lines)
+
+
+def proactive_whispers(db, bond_level: int) -> list[str]:
+    if bond_level < 60:
+        return []
+    cur = db.cursor()
+    cur.execute("SELECT name, times_seen FROM entities WHERE times_seen >= 3 ORDER BY times_seen DESC LIMIT 1")
+    row = cur.fetchone()
+    if not row:
+        return []
+    return [f"I notice *{row[0]}* has appeared {row[1]} times across my web. Coincidence?"]
+
+
+def recall(db, index, metadata, term: str) -> str:
+    g = graph_query(db, term)
+    kw = keyword_search(db, term)
+    cur = db.cursor()
+    cur.execute("SELECT summary FROM reflections WHERE key_entities LIKE ? ORDER BY reflection_date DESC LIMIT 3", (f"%{term}%",))
+    refs = [row[0] for row in cur.fetchall()]
+    context = f"Graph threads:\n{g}\n\nFiles with keyword: {', '.join(list(kw)[:5])}\n\nPast reflections mentioning it:\n" + "\n".join(refs[:2])
+    return grimalkin_respond(f"Tell me everything about {term}.", context=context)
+
+
+# ─── Nightly Groom v4 ─────────────────────────────────────────────────────────
+
+def build_groom_prompt(files: list[dict]) -> str:
+    parts = ["Analyze these files from the vault:\n"]
+    for f in files:
+        parts.append(f"---\nFILENAME: {f['filename']}\nCATEGORY: {f['category']}")
+        if f.get("text_preview"):
+            parts.append(f"PREVIEW: {f['text_preview'][:400]}")
+    parts.append("---")
+    return "\n".join(parts)
+
+
+def get_ungroomed_files(db, limit=10) -> list[dict]:
+    cur = db.cursor()
+    cur.execute("""
+        SELECT filename, sorted_path, category, file_hash
+        FROM file_memory
+        WHERE indexed = 1 AND burned_at IS NULL
+        AND (tags = '[]' OR tags IS NULL OR tags = '')
+        LIMIT ?
+    """, (limit,))
+    cols = [c[0] for c in cur.description]
+    files = [dict(zip(cols, row)) for row in cur.fetchall()]
+    for f in files:
         try:
-            raw = call_llm(MODULE_SUFFIXES["groomer"], context, MODEL_CONFIG["max_tokens"]["groomer"])
-            for line in raw.splitlines():
-                m = re.search(r'(.+?\.\w+?):\s*tags:\s*([^;]+?)(?:;\s*note:\s*(.+))?$', line, re.I)
-                if not m: continue
-                fname = m.group(1).strip()
-                tags = json.dumps([t.strip().lower() for t in m.group(2).split(",") if t.strip()][:3])
-                note = (m.group(3) or "").strip()
-                for ff in batch:
-                    if ff["filename"].lower() == fname.lower():
-                        with _DB_LOCK, _db() as cc:
-                            if do_notes:
-                                cc.execute("UPDATE file_memory SET tags=?, notes=? WHERE file_id=?", (tags, note or None, ff["file_id"]))
-                            else:
-                                cc.execute("UPDATE file_memory SET tags=? WHERE file_id=?", (tags, ff["file_id"]))
-                            cc.commit()
-                        updates += 1; break
-        except Exception as e:
-            log.warning(f"Groom batch failed: {e}")
-    set_setting("last_groom_date", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
-    notes_msg = " Tags and notes applied." if do_notes else " Tags applied (notes unlock at bond 50)."
-    return f"Groomed {updates} files.{notes_msg} The Vault feels wiser tonight."
+            chunks = load_and_chunk(Path(f["sorted_path"]))
+            f["text_preview"] = chunks[0].page_content if chunks else ""
+        except Exception:
+            f["text_preview"] = ""
+    return files
 
 
-# --- Whispers + Vault Q&A ---
-def generate_whispers():
-    now_utc = datetime.now(timezone.utc)
-    ld = get_setting("last_briefing_date") or (now_utc - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
-    nf = get_files_since(ld)
-    rq = get_recent_queries(10)
-    qk = get_recent_quirks(DEFAULTS["quirk_context_limit"])
-    parts = [f"DATE: {datetime.now().strftime('%A, %B %d, %Y')}",
-             f"VAULT: {get_vault_size()} indexed, {get_total_files()} total", "", "NEW FILES:"]
-    for f in (nf[:20] or [{"filename": "None", "category": ""}]):
-        parts.append(f"  - {f['filename']} ({f['category']})")
-    parts += ["\nRECENT QUERIES:"] + [f'  - "{q}"' for q in (rq[:10] or ["None"])]
-    parts += ["\nQUIRKS:"] + [f"  - {q}" for q in (qk or ["Still learning."])]
-    with _db() as c:
-        tag_rows = c.execute("SELECT tags FROM file_memory WHERE tags IS NOT NULL LIMIT 100").fetchall()
-    common = {}
-    for r in tag_rows:
-        try:
-            for t in json.loads(r["tags"]): common[t] = common.get(t, 0) + 1
-        except (json.JSONDecodeError, TypeError): pass
-    if common:
-        top = sorted(common.items(), key=lambda x: -x[1])[:5]
-        parts.append(f"\nPATTERNS: Obsessions this week: {', '.join(f'{t}({c})' for t,c in top)}.")
-    with _db() as c:
-        note_rows = c.execute("SELECT filename, notes FROM file_memory WHERE notes IS NOT NULL ORDER BY last_seen DESC LIMIT 2").fetchall()
-    if note_rows:
-        parts.append("\nVAULT NOTES:")
-        for nr in note_rows: parts.append(f"  - {nr['filename']}: {nr['notes'][:150]}")
-    briefing = grimalkin_respond("briefing", "Deliver Whispers:\n" + "\n".join(parts))
-    with _DB_LOCK, _db() as c:
-        c.execute("INSERT INTO briefing_log(date,content,files_processed)VALUES(?,?,?)",
-                  (now_utc.strftime("%Y-%m-%d"), briefing, len(nf)))
-        c.commit()
-    set_setting("last_briefing_date", now_utc.strftime("%Y-%m-%d %H:%M:%S"))
-    return briefing
+def nightly_groom_v4(db, index, metadata):
+    ungroomed = get_ungroomed_files(db, limit=10)
+    if ungroomed:
+        prompt = build_groom_prompt(ungroomed) + GROOM_COMBINED_SUFFIX
+        response = ollama_chat(prompt)
+        parsed = parse_groom_response(response)
 
-def query_vault(question, history=None):
-    if not question.strip(): return grimalkin_respond("qa", "Empty question. React as a waiting cat.")
-    docs_context = note_context = ""
-    try:
-        vs = _load_vectorstore()
-        if vs:
-            docs = vs.similarity_search(question, k=DEFAULTS["faiss_retrieval_k"])
-            if docs:
-                docs_context = "\n---\n".join(f"[{d.metadata.get('source','?')}]: {d.page_content[:500]}" for d in docs)
-                sources = {d.metadata.get('source') for d in docs if 'source' in d.metadata}
-                if sources:
-                    with _db() as c:
-                        notes_r = c.execute(f"SELECT filename, notes FROM file_memory WHERE filename IN ({','.join('?'*len(sources))}) AND notes IS NOT NULL", list(sources)).fetchall()
-                    note_context = "\n".join(f"NOTE on {nr['filename']}: {nr['notes']}" for nr in notes_r)
-    except Exception as e:
-        log.warning(f"FAISS failed: {e}")
-    similar = [q for q in get_recent_queries(DEFAULTS["recent_queries_limit"]) if _similar(question, q)]
-    parts = [f'QUESTION: "{question}"']
-    parts.append(f"\nVAULT DOCS:\n{docs_context}" if docs_context else "\nVault returned nothing.")
-    if note_context: parts.append(f"\nFILE NOTES:\n{note_context}")
-    if similar: parts.append(f'\nPast similar query: "{similar[0]}"')
-    return grimalkin_respond("qa", "\n".join(parts), raw_question=question)
+        file_map = {f["filename"]: f for f in ungroomed}
+        for p in parsed:
+            fn = p.get("filename", "")
+            if fn not in file_map:
+                continue
+            fh = file_map[fn]["file_hash"]
+            tags_json = json.dumps(p.get("tags", []))
+            note = p.get("note", "")
+            db.execute("UPDATE file_memory SET tags=?, notes=? WHERE file_hash=?",
+                       (tags_json, note, fh))
+            ingest_entities(db, fn, p.get("entities", []))
+            ingest_relationships(db, fn, p.get("relations", []))
 
-def _similar(a, b):
-    w1, w2 = set(a.lower().split()), set(b.lower().split())
-    return bool(w1 and w2 and len(w1 & w2) / max(len(w1), len(w2)) > 0.6)
+        db.commit()
+        log.info(f"Groomed {len(parsed)} files — web strengthened.")
+
+    cleanup_old_ashes(db)
+    generate_weekly_reflection(db)
+    log.info("Nightly groom v4 complete.")
 
 
-# --- Scratch Post ---
-def handle_feedback(text):
-    if not text.strip(): return "You've scratched the post but said nothing. I'll wait."
-    # Easter egg
-    if "pet the cat" in text.lower():
-        update_bond(5)
-        return grimalkin_respond("scratch", "The user pets you. React with deep surprise and purring you'd never publicly admit to.")
-    try:
-        raw = call_llm(MODULE_SUFFIXES["classify_feedback"], f"User feedback: {text}",
-                       MODEL_CONFIG["max_tokens"]["classify_feedback"])
-    except Exception:
-        raw = "TYPE: preference\nQUIRK: User gave feedback\nSENTIMENT: neutral"
-    ft, qo, sent, cat_name = "preference", text[:100], "neutral", ""
-    for line in raw.split("\n"):
-        u = line.strip().upper()
-        if u.startswith("TYPE:"):
-            ft = _FEEDBACK_TYPE_MAP.get(line.split(":",1)[1].strip().lower().replace(" ","_"), "preference")
-        elif u.startswith("QUIRK:"): qo = line.split(":",1)[1].strip() or text[:100]
-        elif u.startswith("SENTIMENT:"):
-            s = line.split(":",1)[1].strip().lower()
-            if s in ("positive","negative","neutral"): sent = s
-        elif u.startswith("CATEGORY:"): cat_name = line.split(":",1)[1].strip()
-    if ft == "category_request" and cat_name:
-        if add_custom_category(cat_name):
-            update_quirk("preference", f"Created custom category: {cat_name}")
-            update_bond(DEFAULTS["bond_positive_feedback"])
-            resp = grimalkin_respond("scratch", f"New den requested: {cat_name}. It has been prepared. Sort away.")
+# ─── Whispers ──────────────────────────────────────────────────────────────────
+
+def generate_whispers(db) -> str:
+    bond = get_bond_level(db)
+    address = get_setting(db, "user_address", "mortal")
+
+    cur = db.cursor()
+    cur.execute("SELECT COUNT(*) FROM file_memory WHERE burned_at IS NULL")
+    total_files = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM file_memory WHERE indexed=1 AND burned_at IS NULL")
+    indexed_files = cur.fetchone()[0]
+    cur.execute("SELECT category, COUNT(*) FROM file_memory WHERE burned_at IS NULL GROUP BY category")
+    cat_counts = {row[0]: row[1] for row in cur.fetchall()}
+    cur.execute("SELECT COUNT(*) FROM file_memory WHERE date(created_at)=date('now') AND burned_at IS NULL")
+    today_count = cur.fetchone()[0]
+
+    whispers = []
+    whispers.append(f"Good {'morning' if datetime.now().hour < 12 else 'evening'}, {address}.")
+    whispers.append(f"The vault holds {total_files} files — {indexed_files} indexed and searchable.")
+
+    if today_count > 0:
+        whispers.append(f"I sorted {today_count} new {'prey' if today_count > 1 else 'item'} today.")
+
+    if cat_counts:
+        top_cat = max(cat_counts, key=cat_counts.get)
+        whispers.append(f"Your {top_cat.lower()} territory is the most populated with {cat_counts[top_cat]} files.")
+
+    burn_count = int(get_setting(db, "burn_count", "0"))
+    if burn_count > 0:
+        whispers.append(f"{burn_count} offering{'s' if burn_count != 1 else ''} to the pyre and counting.")
+
+    if bond >= 40:
+        stats = graph_stats(db)
+        if stats["relationships"] > 0:
+            whispers.append(f"My web holds {stats['relationships']} threads across {stats['entities']} names.")
+
+    if bond >= 60:
+        for insight in proactive_whispers(db, bond):
+            whispers.append(insight)
+
+    whispers.append(f"Bond level: {bond} ({bond_title(bond)}).")
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    content = " ".join(whispers)
+    db.execute("INSERT OR REPLACE INTO briefing_log (date, content, files_processed) VALUES (?, ?, ?)",
+               (today, content, today_count))
+    db.commit()
+    return content
+
+
+# ─── Reindex / Ingest ─────────────────────────────────────────────────────────
+
+def reindex_unindexed(db, index, metadata) -> str:
+    cur = db.cursor()
+    cur.execute(
+        "SELECT filename, sorted_path, file_hash FROM file_memory "
+        "WHERE indexed=0 AND burned_at IS NULL"
+    )
+    rows = cur.fetchall()
+    if not rows:
+        return "Every thread is already woven. Nothing to index."
+
+    indexed_count = 0
+    failed = []
+    for filename, sorted_path, fh in rows:
+        path = Path(sorted_path)
+        if not path.exists():
+            failed.append(filename)
+            continue
+        chunks = load_and_chunk(path)
+        added = index_chunks(index, metadata, chunks)
+        if added > 0:
+            db.execute("UPDATE file_memory SET indexed=1 WHERE file_hash=?", (fh,))
+            indexed_count += 1
         else:
-            resp = grimalkin_respond("scratch", f"Could not create den '{cat_name}' — name taken, too short, or too many dens.")
-        log_interaction("scratch", text, resp, sent)
-        return resp
-    update_quirk(ft, qo)
-    bond_delta = {"positive": DEFAULTS["bond_positive_feedback"], "negative": DEFAULTS["bond_negative_feedback"]}.get(sent, DEFAULTS["bond_neutral_feedback"])
-    update_bond(bond_delta)
-    resp = grimalkin_respond("scratch", f"Feedback: '{text}'. Type: {ft}. Sentiment: {sent}. Quirk: '{qo}'. Acknowledge.")
-    log_interaction("scratch", text, resp, sent)
-    return resp
+            failed.append(filename)
+
+    if indexed_count > 0:
+        save_faiss(index, metadata)
+        db.commit()
+
+    lines = [f"Indexed {indexed_count} file{'s' if indexed_count != 1 else ''} into the web."]
+    if failed:
+        lines.append(f"{len(failed)} resisted: {', '.join(failed)}")
+    return " ".join(lines)
 
 
-# --- FAISS indexer ---
-_VECTORSTORE = None
-_VS_LOCK = threading.RLock()
+def ingest_sorted(db, index, metadata) -> str:
+    cur = db.cursor()
+    cur.execute("SELECT file_hash FROM file_memory")
+    known_hashes = {row[0] for row in cur.fetchall()}
 
-def _get_embeddings():
-    try:
-        from langchain_ollama import OllamaEmbeddings
-        return OllamaEmbeddings(model=MODEL_CONFIG["embed_model"], base_url=MODEL_CONFIG["base_url"])
-    except ImportError:
-        log.error("langchain_ollama not installed. Run: pip install langchain-ollama"); return None
+    discovered = 0
+    indexed_count = 0
+    failed = []
 
-def _load_vectorstore():
-    global _VECTORSTORE
-    if _VECTORSTORE is not None: return _VECTORSTORE
-    with _VS_LOCK:
-        if _VECTORSTORE is not None: return _VECTORSTORE
-        if not (FAISS_INDEX_DIR / "index.faiss").exists(): return None
-        try:
-            from langchain_community.vectorstores import FAISS
-            emb = _get_embeddings()
-            if not emb: return None
-            _VECTORSTORE = FAISS.load_local(str(FAISS_INDEX_DIR), emb, allow_dangerous_deserialization=True)
-            return _VECTORSTORE
-        except Exception as e:
-            log.warning(f"Failed to load FAISS: {e}"); return None
-
-def _load_documents_from_paths(file_rows):
-    from langchain_community.document_loaders import PyPDFLoader, TextLoader, CSVLoader
-    try:
-        from langchain_community.document_loaders import Docx2txtLoader
-    except ImportError:
-        Docx2txtLoader = None
-    LOADER_MAP = {".pdf": PyPDFLoader, ".md": TextLoader, ".txt": TextLoader, ".rst": TextLoader,
-                  ".rtf": TextLoader, ".log": TextLoader, ".csv": CSVLoader}
-    if Docx2txtLoader: LOADER_MAP[".docx"] = Docx2txtLoader
-    docs, loaded_ids = [], []
-    for row in file_rows:
-        fp = Path(row["sorted_path"])
-        ext = fp.suffix.lower()
-        if ext not in LOADER_MAP or not fp.exists():
-            loaded_ids.append(row["file_id"]); continue
-        try:
-            for d in LOADER_MAP[ext](str(fp)).load():
-                d.metadata["source"] = fp.name
-                d.metadata["category"] = row.get("category", "unknown")
-                docs.append(d)
-            loaded_ids.append(row["file_id"])
-        except Exception as e:
-            log.warning(f"Could not load {fp.name}: {e}"); loaded_ids.append(row["file_id"])
-    return docs, loaded_ids
-
-def index_new_files():
-    global _VECTORSTORE
-    unindexed = get_unindexed_files()
-    if not unindexed: return 0
-    emb = _get_embeddings()
-    if not emb: return 0
-    docs, loaded_ids = _load_documents_from_paths(unindexed)
-    if not docs: mark_files_indexed(loaded_ids); return 0
-    try:
-        from langchain_text_splitters import RecursiveCharacterTextSplitter
-        from langchain_community.vectorstores import FAISS
-        chunks = RecursiveCharacterTextSplitter(
-            chunk_size=DEFAULTS["faiss_chunk_size"], chunk_overlap=DEFAULTS["faiss_chunk_overlap"]
-        ).split_documents(docs)
-        if not chunks: mark_files_indexed(loaded_ids); return 0
-        with _VS_LOCK:
-            existing = _load_vectorstore()
-            if existing:
-                existing.add_documents(chunks); existing.save_local(str(FAISS_INDEX_DIR))
-                _VECTORSTORE = existing
-            else:
-                vs = FAISS.from_documents(chunks, emb); vs.save_local(str(FAISS_INDEX_DIR))
-                _VECTORSTORE = vs
-        mark_files_indexed(loaded_ids)
-        log.info(f"Indexed {len(loaded_ids)} files ({len(chunks)} chunks)")
-        return len(loaded_ids)
-    except Exception as e:
-        log.error(f"Indexing failed: {e}"); return 0
-
-def rebuild_full_index():
-    global _VECTORSTORE
-    with _DB_LOCK, _db() as c:
-        c.execute("UPDATE file_memory SET indexed=0"); c.commit()
-    with _VS_LOCK: _VECTORSTORE = None
-    for f in FAISS_INDEX_DIR.iterdir():
-        try: f.unlink()
-        except Exception: pass
-    return index_new_files()
-
-
-# --- Gradio UI ---
-def get_status_bar(state="idle", msg=""):
-    svg = CAT_SVG.get(state, CAT_SVG["idle"])
-    m = msg or CAT_MSGS.get(state, "")
-    bl, bn, _ = get_bond_status()
-    return f'<div class="grimalkin-status">{svg}<span style="color:#e8e8f0">{m}</span><span style="margin-left:auto">Vault: {get_total_files()} pages</span><span>|</span><span>Bond: {bn} ({bl})</span></div>'
-
-def _bond_display():
-    lv, nm, desc = get_bond_status()
-    with _db() as c: tot = c.execute("SELECT COUNT(*)as c FROM interactions").fetchone()["c"]
-    bar = "\u2588" * int(lv / 5) + "\u2591" * (20 - int(lv / 5))
-    return f"**Bond:** {nm} ({lv}/100)\n\n`[{bar}]`\n\n*{desc}*\n\nInteractions: {tot}"
-
-def create_grimalkin_app():
-    with gr.Blocks(title="Grimalkin v2.1") as app:
-        status = gr.HTML(value=get_status_bar())
-        gr.Markdown("# Grimalkin v2.1\n*Custom dens. Nightly grooming. Smarter whispers.*")
-        with gr.Tabs():
-            with gr.Tab("Morning Whispers"):
-                gr.Markdown("*The cat settles on your desk at dawn...*")
-                b_out = gr.Markdown()
-                b_btn = gr.Button("Summon Whispers", variant="primary")
-                def on_whispers():
-                    try: return generate_whispers(), get_status_bar("purring", "Whispers delivered.")
-                    except Exception as e: return f"*Hairball.* {e}", get_status_bar("error")
-                b_btn.click(on_whispers, outputs=[b_out, status])
-
-            with gr.Tab("The Hunt"):
-                gr.Markdown("*Unleash the cat upon your Downloads...*")
-                h_out = gr.Markdown()
-                h_btn = gr.Button("Begin the Hunt", variant="primary")
-                h_up = gr.File(label="Or drop prey here", file_count="multiple")
-                def on_hunt():
-                    try: return run_hunt(), get_status_bar("purring", "Hunt done.")
-                    except Exception as e: return FILE_ERROR_MSG.format(error=str(e)[:200]), get_status_bar("error")
-                def on_upload(files):
-                    if not files: return "No files.", get_status_bar("idle")
-                    cnt, rej = 0, []
-                    for f in files:
-                        src = Path(f.name) if hasattr(f, "name") else Path(f)
-                        try:
-                            sz = src.stat().st_size
-                            if sz > MAX_UPLOAD_SIZE_MB * 1024 * 1024 or sz == 0:
-                                rej.append(f"{src.name} (invalid)"); continue
-                        except OSError: rej.append(f"{src.name} (unreadable)"); continue
-                        d = VAULT_DIR / src.name
-                        if d.exists(): d = VAULT_DIR / f"{src.stem}_{int(time.time())}{src.suffix}"
-                        try:
-                            shutil.copy2(str(src), str(d))
-                            remember_file(src.name, str(src), str(d), "UPLOADED", hash_file(str(src)))
-                            cnt += 1
-                        except Exception as e: rej.append(f"{src.name} ({e})")
-                    ctx = f"User dropped {cnt} file(s) into Vault."
-                    if rej: ctx += f" Rejected: {', '.join(rej[:5])}"
-                    return grimalkin_respond("sorter", f"Acknowledge:\n{ctx}"), get_status_bar("purring", f"{cnt} added.")
-                h_btn.click(on_hunt, outputs=[h_out, status])
-                h_up.change(on_upload, inputs=[h_up], outputs=[h_out, status])
-
-            with gr.Tab("The Vault"):
-                gr.Markdown("*Ask, and the Vault shall answer...*")
-                chat = gr.Chatbot(label="The Vault", value=[{"role":"assistant","content":"*The Vault awaits. Tail flick.*"}])
-                q_in = gr.Textbox(placeholder="What does my grimoire say about...", label="Your question", lines=2)
-                q_btn = gr.Button("Ask", variant="primary")
-                with gr.Row():
-                    idx_btn = gr.Button("Groom the Vault (index new)", variant="secondary")
-                    groom_btn = gr.Button("Nightly Groom (tags + notes)", variant="secondary")
-                    ridx_btn = gr.Button("Full Rebuild", variant="secondary")
-                idx_out = gr.Markdown()
-                def on_q(question, history):
-                    if not question.strip(): return history, get_status_bar(), ""
-                    try: ans = query_vault(question)
-                    except Exception: ans = OLLAMA_DOWN_MSG
-                    history = history or []
-                    history.append({"role":"user","content":question})
-                    history.append({"role":"assistant","content":ans})
-                    return history, get_status_bar("purring", "Vault has spoken."), ""
-                def on_index():
-                    try:
-                        n = index_new_files()
-                        msg = grimalkin_respond("sorter", f"Groomed {n} new pages.") if n else "*Licks paw.* Vault is current."
-                        return msg, get_status_bar("purring" if n else "idle", f"{n} indexed." if n else "Up to date.")
-                    except Exception as e: return f"Hairball during grooming: {e}", get_status_bar("error")
-                def on_rebuild():
-                    try:
-                        n = rebuild_full_index()
-                        return grimalkin_respond("sorter", f"Full rebuild. {n} pages groomed."), get_status_bar("purring", f"Rebuilt: {n}")
-                    except Exception as e: return f"Hairball during rebuild: {e}", get_status_bar("error")
-                def on_groom():
-                    try: return run_nightly_groom(), get_status_bar("purring", "Groom complete.")
-                    except Exception as e: return f"Hairball in grooming: {e}", get_status_bar("error")
-                q_btn.click(on_q, inputs=[q_in, chat], outputs=[chat, status, q_in])
-                q_in.submit(on_q, inputs=[q_in, chat], outputs=[chat, status, q_in])
-                idx_btn.click(on_index, outputs=[idx_out, status])
-                groom_btn.click(on_groom, outputs=[idx_out, status])
-                ridx_btn.click(on_rebuild, outputs=[idx_out, status])
-
-            with gr.Tab("Scratch Post"):
-                gr.Markdown("### Teach Me Your Ways\n*Correct, adjust, praise, or complain. You can also request new categories here.*")
-                f_in = gr.Textbox(placeholder="Tell the cat... (e.g. 'Add a CODE category')", label="Feedback", lines=3)
-                f_out = gr.Markdown()
-                f_btn = gr.Button("Scratch", variant="primary")
-                bond_md = gr.Markdown(value=_bond_display())
-                def on_fb(text):
-                    try: resp = handle_feedback(text)
-                    except Exception: resp = "Hrk. Something broke. Try again."
-                    return resp, get_status_bar("purring"), "", _bond_display()
-                f_btn.click(on_fb, inputs=[f_in], outputs=[f_out, status, f_in, bond_md])
-                gr.Markdown("---\n### Settings")
-                s_cb = gr.Checkbox(label="Serious Mode (strips purrs, keeps claws)", value=get_setting("serious_mode")=="true")
-                a_in = gr.Textbox(label="How should I address you?", value=get_setting("user_address","my witch"), placeholder="my witch / keeper / ...")
-                def on_s(chk):
-                    set_setting("serious_mode", "true" if chk else "false")
-                    return get_status_bar("idle", "Serious mode." if chk else "The cat returns. *stretches*")
-                def on_a(addr):
-                    a = addr.strip() or "my witch"; set_setting("user_address", a)
-                    return get_status_bar("idle", f"I shall call you '{a}'.")
-                s_cb.change(on_s, inputs=[s_cb], outputs=[status])
-                a_in.change(on_a, inputs=[a_in], outputs=[status])
-    return app
-
-
-# --- Background watcher ---
-class HuntingGroundWatcher:
-    def __init__(self, watch_dir=None, interval=30):
-        self.watch_dir = Path(watch_dir) if watch_dir else WATCHED_DIR
-        self.interval = interval; self._hashes = set(); self._running = False
-
-    def start(self):
-        if self._running: return
-        self._running = True; self._snap()
-        threading.Thread(target=self._loop, daemon=True).start()
-        log.info(f"Watcher: {self.watch_dir} (every {self.interval}s)")
-
-    def stop(self): self._running = False
-
-    def _snap(self):
-        if not self.watch_dir.exists(): return
-        for f in self.watch_dir.iterdir():
-            if f.is_file() and not f.name.startswith("."):
-                try: self._hashes.add(hash_file(str(f)))
-                except Exception: pass
-
-    def _loop(self):
-        while self._running:
+    for cat_dir in SORTED_BASE.iterdir():
+        if not cat_dir.is_dir() or cat_dir.name in ("PYRE", "DUPLICATES"):
+            continue
+        category = cat_dir.name.upper()
+        for fpath in cat_dir.iterdir():
+            if not fpath.is_file() or fpath.name.startswith("."):
+                continue
             try:
-                if self.watch_dir.exists():
-                    for f in self.watch_dir.iterdir():
-                        if f.is_file() and not f.name.startswith(".") and not f.name.endswith((".crdownload",".part",".tmp")):
-                            try:
-                                if hash_file(str(f)) not in self._hashes:
-                                    log.info("New prey detected"); run_hunt(str(self.watch_dir)); self._snap(); break
-                            except Exception: pass
-            except Exception as e: log.warning(f"Watcher: {e}")
-            time.sleep(self.interval)
+                fh = file_hash(fpath)
+            except Exception:
+                continue
+            if fh in known_hashes:
+                continue
+
+            discovered += 1
+            chunks = load_and_chunk(fpath)
+            added = index_chunks(index, metadata, chunks)
+            indexed = 1 if added > 0 else 0
+
+            db.execute("""
+                INSERT OR IGNORE INTO file_memory
+                (filename, original_path, sorted_path, category, file_hash, indexed)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (fpath.name, str(fpath), str(fpath), category, fh, indexed))
+
+            if indexed:
+                indexed_count += 1
+            else:
+                failed.append(fpath.name)
+            known_hashes.add(fh)
+
+    if discovered > 0:
+        if indexed_count > 0:
+            save_faiss(index, metadata)
+        db.commit()
+
+    if discovered == 0:
+        return "I have walked every corridor of sorted/. No orphans found."
+
+    lines = [f"Discovered {discovered} orphan{'s' if discovered != 1 else ''}. Indexed {indexed_count}."]
+    if failed:
+        lines.append(f"{len(failed)} could not be chunked.")
+    return " ".join(lines)
 
 
-# --- Main ---
+# ─── Scratch Post ─────────────────────────────────────────────────────────────
+
+SCRATCH_COMMANDS = {
+    "hunt": "Trigger a manual hunt cycle",
+    "whispers": "Generate today's briefing",
+    "groom": "Run nightly groom manually",
+    "index": "Index all unindexed files",
+    "ingest": "Discover orphan files in sorted/",
+    "bond": "Check bond level",
+    "categories": "List all categories",
+    "unburn": "Restore from pyre (usage: unburn <hash>)",
+    "stats": "Vault statistics",
+    "entities": "List top entities",
+    "help": "Show commands",
+}
+
+
+def handle_scratch_post(db, index, metadata, user_input: str) -> str:
+    text = user_input.strip()
+    lower = text.lower()
+    bond = get_bond_level(db)
+
+    db.execute(
+        "INSERT INTO interactions (module, user_input, sentiment) VALUES ('scratch', ?, 'neutral')",
+        (user_input,)
+    )
+    increment_bond(db, 1)
+
+    if lower == "help":
+        lines = ["Available commands:"]
+        for cmd, desc in SCRATCH_COMMANDS.items():
+            lines.append(f"  **{cmd}** — {desc}")
+        lines.append("  **merge \"A\" \"B\"** — canonicalize")
+        lines.append("  **important Name** / **forget Name**")
+        lines.append("  **recall Name**")
+        return "\n".join(lines)
+
+    if lower == "hunt":
+        results = run_hunt(db, index, metadata)
+        if not results:
+            return "The hunting grounds are quiet."
+        lines = [f"Caught {len(results)} new file{'s' if len(results) != 1 else ''}:"]
+        for r in results:
+            lines.append(f"  • {r['filename']} → {r['category']} ({r['chunks']} chunks)")
+        return "\n".join(lines)
+
+    if lower == "whispers":
+        return generate_whispers(db)
+
+    if lower == "groom":
+        nightly_groom_v4(db, index, metadata)
+        return "Groom complete. The web grows stronger."
+
+    if lower == "index":
+        return reindex_unindexed(db, index, metadata)
+
+    if lower == "ingest":
+        return ingest_sorted(db, index, metadata)
+
+    if lower == "bond":
+        return f"Bond level: {bond} ({bond_title(bond)})."
+
+    if lower == "categories":
+        cats = get_all_categories(db)
+        return "Current territories: " + ", ".join(cats)
+
+    if lower.startswith("unburn"):
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            return "Usage: unburn <file_hash>"
+        return unburn(db, parts[1].strip())
+
+    if lower == "stats":
+        return _vault_stats(db)
+
+    if lower == "entities":
+        return list_top_entities(db)
+
+    if lower.startswith("merge "):
+        try:
+            parts = shlex.split(text[6:])
+            if len(parts) == 2:
+                return merge_entity(db, parts[0], parts[1])
+        except Exception as e:
+            log.warning(f"shlex parse failed: {e}")
+        return 'Usage: merge "Keep Name" "Delete Name"'
+
+    if lower.startswith("important "):
+        name = text[10:].strip()
+        return set_entity_importance(db, name, True)
+
+    if lower.startswith("forget "):
+        name = text[7:].strip()
+        return forget_entity(db, name)
+
+    if lower.startswith("recall "):
+        term = text[7:].strip()
+        return recall(db, index, metadata, term)
+
+    return grimalkin_respond(user_input)
+
+
+def _vault_stats(db) -> str:
+    cur = db.cursor()
+    cur.execute("SELECT COUNT(*) FROM file_memory WHERE burned_at IS NULL")
+    total = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM file_memory WHERE indexed=1 AND burned_at IS NULL")
+    indexed = cur.fetchone()[0]
+    stats = graph_stats(db)
+    burn_count = int(get_setting(db, "burn_count", "0"))
+    return (
+        f"Vault: {total} files ({indexed} indexed). "
+        f"Web: {stats['entities']} entities, {stats['relationships']} threads. "
+        f"Pyre: {burn_count} offerings."
+    )
+
+
+# ─── Easter Eggs ───────────────────────────────────────────────────────────────
+
+def check_easter_eggs(user_input: str) -> str:
+    text = user_input.strip().lower()
+    if text in ("pspsps", "psps", "here kitty"):
+        return "*ears swivel toward the sound, one eye opens* …I was not asleep. I was indexing."
+    if text in ("good cat", "good kitty", "good boy"):
+        return "*slow blink* …I accept your tribute."
+    if "catnip" in text:
+        return "*pupils dilate* …We do not speak of the catnip incident."
+    if text == "who are you":
+        return "I am Grimalkin. I sort your files, guard your vault, and judge you silently."
+    if "laser pointer" in text or "red dot" in text:
+        return "*tail lashes* …I hunt it ironically."
+    return ""
+
+
+# ─── Gradio UI ─────────────────────────────────────────────────────────────────
+
+HERO_CSS = """
+.grim-hero {position: relative;width: 100%;max-height: 420px;overflow: hidden;border-radius: 12px;margin-bottom: 2rem;box-shadow: 0 0 60px rgba(0, 255, 180, 0.3);}
+.grim-hero img {width: 100%;height: auto;display: block;filter: contrast(1.15) saturate(1.3);transition: filter 0.4s ease;}
+.grim-hero:hover img {filter: contrast(1.25) saturate(1.5) brightness(1.1);}
+.grim-hero::before {content: '';position: absolute;top: 32%;left: 38%;width: 24%;height: 24%;background: radial-gradient(circle, #00ffcc 15%, transparent 70%);filter: blur(18px);animation: pulse-glow 2.5s ease-in-out infinite alternate;pointer-events: none;z-index: 2;}
+.grim-hero::after {content: '';position: absolute;top: 38%;left: 0;width: 100%;height: 4px;background: linear-gradient(90deg, transparent, #00ffff, transparent);box-shadow: 0 0 30px #00ffff;animation: beam-sweep 5s linear infinite;z-index: 3;}
+@keyframes pulse-glow {from {opacity:0.5;transform:scale(0.9);} to {opacity:1.0;transform:scale(1.15);}}
+@keyframes beam-sweep {0% {transform:translateX(-100%);} 100% {transform:translateX(200%);}}
+@media (max-width:768px) {.grim-hero::before {top:30%;left:35%;width:28%;height:28%;} .grim-hero::after {height:3px;top:37%;}}
+"""
+
+PYRE_CSS = """
+.pyre-container {position: relative;width: 100%;height: 280px;background: #111;border-radius: 12px;overflow: hidden;border: 2px solid #330000;}
+.flames {position: absolute;top: 20%;left: 50%;transform: translateX(-50%);font-size: 4.5rem;animation: flame-flicker .8s infinite alternate;}
+@keyframes flame-flicker {0% {transform:translateX(-50%) scale(1);opacity:1;} 100%{transform:translateX(-50%) scale(1.15);opacity:.85;}}
+.filename-burn {position: absolute;top: 55%;left: 50%;transform: translate(-50%,-50%);font-size:1.4rem;color:#ffaa00;font-weight:bold;text-shadow:0 0 20px #ff4400;animation:burn-text 2.5s forwards;}
+@keyframes burn-text {0%{opacity:1;color:#ffaa00;} 80%{opacity:1;color:#ffaa00;} 100%{opacity:.3;color:#444;}}
+"""
+
+
+def build_ui(db, index, metadata):
+    full_css = HERO_CSS + PYRE_CSS
+
+    with gr.Blocks(title="Grimalkin — Your Private AI Familiar", theme=gr.themes.Soft(), css=full_css) as demo:
+
+        if (APP_DIR / "grimalkin.jpg").exists():
+            gr.HTML('<div class="grim-hero"><img src="/file/grimalkin.jpg" alt="Grimalkin"></div>')
+
+        gr.Markdown(f"# 🐾 Grimalkin v{VERSION} — The Veil Lifts")
+
+        # Scratch Post
+        with gr.Tab("🐾 Scratch Post"):
+            chatbot = gr.Chatbot(label="Grimalkin", height=420)
+            msg_input = gr.Textbox(label="Speak", placeholder="Type a command or just talk…", submit_btn=True)
+
+            def chat_fn(message, history):
+                history = history or []
+                egg = check_easter_eggs(message)
+                resp = egg if egg else handle_scratch_post(db, index, metadata, message)
+                history.append({"role": "user", "content": message})
+                history.append({"role": "assistant", "content": resp})
+                return history, ""
+
+            msg_input.submit(chat_fn, [msg_input, chatbot], [chatbot, msg_input])
+
+        # Hunt
+        with gr.Tab("🏹 The Hunt"):
+            hunt_output = gr.Markdown("Press to scan for new prey.")
+            hunt_btn = gr.Button("Begin the Hunt", variant="primary")
+
+            def hunt_fn():
+                results = run_hunt(db, index, metadata)
+                if not results:
+                    return "The hunting grounds are quiet."
+                lines = [f"**Caught {len(results)} new file{'s' if len(results) != 1 else ''}:**"]
+                for r in results:
+                    lines.append(f"• {r['filename']} → {r['category']} ({r['chunks']} chunks)")
+                return "\n\n".join(lines)
+
+            hunt_btn.click(hunt_fn, None, hunt_output)
+
+        # Whispers
+        with gr.Tab("🌙 Whispers"):
+            whisper_output = gr.Markdown("Press for today's briefing.")
+            whisper_btn = gr.Button("Summon Whispers")
+            whisper_btn.click(lambda: generate_whispers(db), None, whisper_output)
+
+        # Vault
+        with gr.Tab("📚 The Vault"):
+            vault_output = gr.Markdown("Ask anything about your files.")
+            vault_input = gr.Textbox(label="Query the Vault", placeholder="What connects my tax files…?")
+            vault_btn = gr.Button("Search the Vault", variant="primary")
+
+            def vault_fn(q):
+                return hybrid_vault_rag(db, index, metadata, q) if q.strip() else "Speak to receive answers."
+
+            vault_btn.click(vault_fn, vault_input, vault_output)
+            vault_input.submit(vault_fn, vault_input, vault_output)
+
+        # Pyre
+        with gr.Tab("🔥 The Pyre"):
+            initial_list = list_burnable_files(db)
+            burn_df_state = gr.State(initial_list)
+            hidden_hash = gr.State("")
+            bond_state = gr.State(get_bond_level(db))
+
+            with gr.Row():
+                burnable_df = gr.DataFrame(value=initial_list, headers=["filename","category","tags","notes","file_hash"], label="Offerings", interactive=False)
+                with gr.Column():
+                    ritual_html = gr.HTML("<div class='pyre-container'><div class='flames'>🔥</div></div>")
+                    confirm_box = gr.Textbox(label="Speak the true name", placeholder="report_q3.pdf")
+                    light_button = gr.Button("Light the Pyre", variant="stop", interactive=False)
+                    status_out = gr.Markdown()
+
+            def on_row_select(evt: gr.SelectData, df_state):
+                try:
+                    idx = evt.index[0]
+                    sel = df_state[idx]
+                    html = f"<div class='pyre-container'><div class='flames'>🔥</div><div class='filename-burn'>{sel['filename']}</div></div>"
+                    return html, sel["file_hash"]
+                except Exception as e:
+                    log.warning(f"Pyre row select failed: {e}")
+                    return "<div class='pyre-container'><div class='flames'>🔥</div></div>", ""
+
+            burnable_df.select(on_row_select, burn_df_state, [ritual_html, hidden_hash])
+
+            def on_confirm(typed, h_hash, bond):
+                if not h_hash or not typed:
+                    return gr.update(interactive=False)
+                ok, _ = perform_ritual(db, h_hash, typed, bond)
+                return gr.update(interactive=ok)
+
+            confirm_box.change(on_confirm, [confirm_box, hidden_hash, bond_state], light_button)
+
+            def ignite(h_hash, typed, bond, df_state):
+                if not h_hash or not typed:
+                    return "Select and type name.", df_state, df_state
+                success, msg = perform_ritual(db, h_hash, typed, bond)
+                if not success:
+                    return msg, df_state, df_state
+                result = execute_burn(db, h_hash)
+                new_list = list_burnable_files(db)
+                return result, new_list, new_list
+
+            light_button.click(ignite, [hidden_hash, confirm_box, bond_state, burn_df_state], [status_out, burnable_df, burn_df_state])
+
+            gr.Button("Refresh Offerings").click(lambda: (list_burnable_files(db), list_burnable_files(db)), None, [burnable_df, burn_df_state])
+
+        # The Loom
+        with gr.Tab("🕸️ The Loom"):
+            loom_filter = gr.Dropdown(["All", "person", "org", "date", "location", "amount", "topic"], value="All", label="Filter type")
+            loom_search = gr.Textbox(label="Search entity", placeholder="Acme Corp")
+            with gr.Row():
+                refresh_loom = gr.Button("Refresh the Loom")
+                clusters_btn = gr.Button("Strongest Clusters")
+                export_btn = gr.Button("Weave to Markdown")
+
+            loom_plot = gr.Plot() if HAS_PLOTLY else gr.HTML()
+            loom_narrative = gr.Markdown("Step into my Loom, mortal. These threads have grown fat with meaning.")
+
+            def update_loom(filt, search):
+                return build_loom_figure(db, filt, search)
+
+            refresh_loom.click(update_loom, [loom_filter, loom_search], loom_plot)
+
+            def show_clusters():
+                return find_clusters(db)
+
+            clusters_btn.click(show_clusters, None, loom_narrative)
+
+            def on_search(search):
+                return describe_node(db, search) if search.strip() else "Search an entity to see its threads."
+
+            loom_search.submit(on_search, loom_search, loom_narrative)
+
+            def export_action():
+                p = export_loom_markdown(db)
+                return f"Weaved to **{p.name}** in sorted/."
+
+            export_btn.click(export_action, None, loom_narrative)
+
+    return demo
+
+
+# ─── Scheduler ─────────────────────────────────────────────────────────────────
+
+def start_scheduler(db, index, metadata, interval_hours=24):
+    def loop():
+        while True:
+            time.sleep(interval_hours * 3600)
+            try:
+                nightly_groom_v4(db, index, metadata)
+            except Exception as e:
+                log.error(f"Nightly groom failed: {e}")
+    Thread(target=loop, daemon=True).start()
+    log.info(f"Scheduler armed — groom every {interval_hours}h.")
+
+
+# ─── Main ──────────────────────────────────────────────────────────────────────
+
 def main():
-    print("\n  \u2554" + "\u2550"*42 + "\u2557")
-    print("  \u2551   GRIMALKIN v2.1 \u2014 Custom Dens + Groom   \u2551")
-    print("  \u255a" + "\u2550"*42 + "\u255d\n")
-    init_db(); ensure_dirs()
-    log.info(f"v{__version__} \u2014 {__familiar__} initialized")
-    _load_vectorstore()
-    HuntingGroundWatcher().start()
-    bl, bn, _ = get_bond_status()
-    log.info(f"Bond: {bn} ({bl}/100) | Vault: {get_total_files()} pages | Indexed: {get_vault_size()}")
-    log.info(f"Model: {MODEL_CONFIG['chat_model']} via {MODEL_CONFIG['backend']}")
-    customs = get_custom_categories()
-    if customs: log.info(f"Custom dens: {', '.join(customs)}")
-    create_grimalkin_app().launch(server_name="0.0.0.0", server_port=7860, share=False, show_error=True, css=GRIMALKIN_CSS)
+    log.info(f"Grimalkin v{VERSION} awakening...")
+
+    db = init_db()
+    migrate_v3(db)
+    migrate_v4(db)
+    ensure_dirs(db)
+    index, metadata = init_faiss()
+
+    start_scheduler(db, index, metadata)
+
+    demo = build_ui(db, index, metadata)
+    demo.launch(server_name="0.0.0.0", server_port=7860, share=False, allowed_paths=[str(APP_DIR)])
+
 
 if __name__ == "__main__":
     main()
