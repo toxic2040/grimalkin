@@ -182,6 +182,7 @@ def init_db() -> sqlite3.Connection:
         "bond_level": "10",
         "serious_mode": "0",
         "user_address": "mortal",
+        "pet_name": "Grimalkin",
         "custom_categories": "[]",
         "burn_timestamps": "[]",
         "burn_count": "0",
@@ -314,17 +315,22 @@ def ollama_chat(prompt: str, system: str = "", model: str = OLLAMA_MODEL) -> str
         return "Hrk. Hairball. Ollama is not responding."
 
 
-PERSONA_SYSTEM = f"""You are Grimalkin, a digital cat familiar. Ancient, observant, slightly sardonic. 
+def build_persona(name: str = "Grimalkin") -> str:
+    """Build the system prompt with the familiar's current name."""
+    return f"""You are {name}, a digital cat familiar. Ancient, observant, slightly sardonic. 
 Never break character. Short precise sentences. Refer to human as 'mortal' or their address. 
 No corporate phrases. No emojis. Max {MAX_PERSONA_TOKENS} tokens.
 Files = prey, folders = territories, knowledge = threads in your web.
 ALWAYS base answers on provided context first. Never ignore context for training data.
 If context answers, use it. If not, say so honestly."""
 
+PERSONA_SYSTEM = build_persona()
 
-def grimalkin_respond(prompt: str, context: str = "") -> str:
+
+def grimalkin_respond(prompt: str, context: str = "", db=None) -> str:
+    name = get_setting(db, "pet_name", "Grimalkin") if db else "Grimalkin"
     full_prompt = f"{context}\n\n{prompt}" if context else prompt
-    raw = ollama_chat(full_prompt, system=PERSONA_SYSTEM)
+    raw = ollama_chat(full_prompt, system=build_persona(name))
     return scrub_corporate(raw)
 
 
@@ -507,7 +513,7 @@ def hybrid_vault_rag(db, index, metadata, query: str) -> str:
             seen.add(fn)
 
     if not boosted:
-        return grimalkin_respond(query, context="The vault is empty.")
+        return grimalkin_respond(query, context="The vault is empty.", db=db)
 
     boosted.sort(key=lambda x: x.get("score", 1.0))
     context_parts = []
@@ -521,7 +527,7 @@ def hybrid_vault_rag(db, index, metadata, query: str) -> str:
         context_parts.append("From my vault:\n" + "\n---\n".join(doc_parts))
 
     context = "\n\n".join(context_parts)
-    return grimalkin_respond(query, context=context)
+    return grimalkin_respond(query, context=context, db=db)
 
 
 # ─── The Hunt (File Sorting) ──────────────────────────────────────────────────
@@ -1126,7 +1132,7 @@ Active days: {active_days}
 Web: {stats['entities']} names, {stats['relationships']} threads
 Top entities: {top_names}
 
-Write a 2-3 sentence reflection in Grimalkin's sardonic cat voice. End with a personal note on our bond."""
+Write a 2-3 sentence reflection in {get_setting(db, 'pet_name', 'Grimalkin')}'s sardonic cat voice. End with a personal note on our bond."""
 
     summary = ollama_chat(prompt, system=PERSONA_SYSTEM)
     summary = scrub_corporate(summary)
@@ -1224,7 +1230,7 @@ def recall(db, index, metadata, term: str) -> str:
     cur.execute("SELECT summary FROM reflections WHERE key_entities LIKE ? ORDER BY reflection_date DESC LIMIT 3", (f"%{term}%",))
     refs = [row[0] for row in cur.fetchall()]
     context = f"Graph threads:\n{g}\n\nFiles with keyword: {', '.join(list(kw)[:5])}\n\nPast reflections mentioning it:\n" + "\n".join(refs[:2])
-    return grimalkin_respond(f"Tell me everything about {term}.", context=context)
+    return grimalkin_respond(f"Tell me everything about {term}.", context=context, db=db)
 
 
 # ─── Nightly Groom v4 ─────────────────────────────────────────────────────────
@@ -1292,6 +1298,7 @@ def nightly_groom_v4(db, index, metadata):
 def generate_whispers(db) -> str:
     bond = get_bond_level(db)
     address = get_setting(db, "user_address", "mortal")
+    pet_name = get_setting(db, "pet_name", "Grimalkin")
 
     cur = db.cursor()
     cur.execute("SELECT COUNT(*) FROM file_memory WHERE burned_at IS NULL")
@@ -1327,7 +1334,7 @@ def generate_whispers(db) -> str:
         for insight in proactive_whispers(db, bond):
             whispers.append(insight)
 
-    whispers.append(f"Bond level: {bond} ({bond_title(bond)}).")
+    whispers.append(f"Bond with {pet_name}: {bond} ({bond_title(bond)}).")
 
     today = datetime.now().strftime("%Y-%m-%d")
     content = " ".join(whispers)
@@ -1441,6 +1448,7 @@ SCRATCH_COMMANDS = {
     "unburn": "Restore from pyre (usage: unburn <hash>)",
     "stats": "Vault statistics",
     "entities": "List top entities",
+    "name": "Rename your familiar (usage: name <new_name>)",
     "help": "Show commands",
 }
 
@@ -1527,7 +1535,18 @@ def handle_scratch_post(db, index, metadata, user_input: str) -> str:
         term = text[7:].strip()
         return recall(db, index, metadata, term)
 
-    return grimalkin_respond(user_input)
+    if lower.startswith("name "):
+        new_name = text[5:].strip()
+        if not new_name or len(new_name) > 40:
+            return "A name must be between 1 and 40 characters, mortal."
+        old_name = get_setting(db, "pet_name", "Grimalkin")
+        set_setting(db, "pet_name", new_name)
+        return grimalkin_respond(
+            f"Your master has renamed you from {old_name} to {new_name}. Acknowledge your new name and react in character.",
+            db=db,
+        )
+
+    return grimalkin_respond(user_input, db=db)
 
 
 def _vault_stats(db) -> str:
@@ -1547,16 +1566,17 @@ def _vault_stats(db) -> str:
 
 # ─── Easter Eggs ───────────────────────────────────────────────────────────────
 
-def check_easter_eggs(user_input: str) -> str:
+def check_easter_eggs(user_input: str, db=None) -> str:
     text = user_input.strip().lower()
+    pet_name = get_setting(db, "pet_name", "Grimalkin") if db else "Grimalkin"
     if text in ("pspsps", "psps", "here kitty"):
-        return "*ears swivel toward the sound, one eye opens* …I was not asleep. I was indexing."
+        return f"*ears swivel toward the sound, one eye opens* …I was not asleep. I was indexing."
     if text in ("good cat", "good kitty", "good boy"):
         return "*slow blink* …I accept your tribute."
     if "catnip" in text:
         return "*pupils dilate* …We do not speak of the catnip incident."
     if text == "who are you":
-        return "I am Grimalkin. I sort your files, guard your vault, and judge you silently."
+        return f"I am {pet_name}. I sort your files, guard your vault, and judge you silently."
     if "laser pointer" in text or "red dot" in text:
         return "*tail lashes* …I hunt it ironically."
     return ""
@@ -1587,12 +1607,14 @@ PYRE_CSS = """
 def build_ui(db, index, metadata):
     full_css = HERO_CSS + PYRE_CSS
 
-    with gr.Blocks(title="Grimalkin — Your Private AI Familiar", theme=gr.themes.Soft(), css=full_css) as demo:
+    with gr.Blocks(title=f"{get_setting(db, 'pet_name', 'Grimalkin')} — Your Private AI Familiar", theme=gr.themes.Soft(), css=full_css) as demo:
+
+        pet_name = get_setting(db, "pet_name", "Grimalkin")
 
         if (APP_DIR / "grimalkin.jpg").exists():
             gr.HTML('<div class="grim-hero"><img src="/file/grimalkin.jpg" alt="Grimalkin"></div>')
 
-        gr.Markdown(f"# 🐾 Grimalkin v{VERSION} — The Veil Lifts")
+        gr.Markdown(f"# 🐾 {pet_name} v{VERSION} — The Veil Lifts")
 
         # Scratch Post
         with gr.Tab("🐾 Scratch Post"):
@@ -1601,7 +1623,7 @@ def build_ui(db, index, metadata):
 
             def chat_fn(message, history):
                 history = history or []
-                egg = check_easter_eggs(message)
+                egg = check_easter_eggs(message, db=db)
                 resp = egg if egg else handle_scratch_post(db, index, metadata, message)
                 history.append({"role": "user", "content": message})
                 history.append({"role": "assistant", "content": resp})
