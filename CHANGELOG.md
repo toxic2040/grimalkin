@@ -1,81 +1,123 @@
-# Grimalkin v2.0 — Integrated Build Changelog
-
-**Source:** `grimalkin.py` (722 LOC) + `indexer.py` (67 LOC) → `grimalkin.py` (983 LOC)
+# Grimalkin — Changelog
 
 ---
 
-## Bug Fixes (from review)
+## v4.1 — The Mirror Wakes
 
-| # | Fix | Lines | Severity |
-|---|-----|-------|----------|
-| 1 | **UTC/local time mismatch** — `generate_whispers` now uses `datetime.now(timezone.utc)` to match SQLite's `datetime('now')` (UTC). Briefings no longer miss files for non-UTC users. | 583–600 | HIGH |
-| 2 | **6 bare `except:` → `except Exception:`** — watcher, Vault tab, Scratch Post, feedback handler. No longer swallows `KeyboardInterrupt`/`SystemExit`. | scattered | HIGH |
-| 3 | **Duplicate files moved to `sorted/DUPLICATES/` instead of `fp.unlink()`** — user files are never silently deleted. | 510–518 | HIGH |
-| 4 | **Qwen3 `<think>` tag stripping** — `scrub_corporate()` now strips `<think>...</think>` blocks before other processing. | 424–427 | HIGH |
-| 5 | **`_call_openai` URL double-`/v1` bug** — now handles `base_url` ending in `/v1` correctly. | 414–420 | MEDIUM |
-| 6 | **`on_upload` hashes source before copy** — no more hashing partial files on interrupted writes. | 848–850 | MEDIUM |
-| 7 | **`log_interaction` bond bump now atomic** — count + bond update happen inside the same `_DB_LOCK` context. No race between count and update. | 312–321 | MEDIUM |
-| 8 | **WAL + `synchronous=NORMAL` set per-connection** in `_db()` context manager, not just in `init_db()`. Survives DB file deletion/recreation. | 244–250 | MEDIUM |
-| 9 | **Symlinks skipped in `run_hunt`** — `not f.is_symlink()` added to file filter. | 503 | LOW |
-| 10 | **`hash_file` size gate** — files >500 MB use fast fingerprint (first+last 8KB + size) instead of full SHA-256. | 470–482 | LOW |
+**The Mirror now has a tab.** It was documented. Now it exists.
 
-## Indexer Integration
+### New Features
 
-| Feature | What it does |
+| Feature | Description |
 |---------|-------------|
-| `_load_vectorstore()` | Lazy singleton — loads FAISS index from disk on first query, not at startup |
-| `_get_embeddings()` | Creates `OllamaEmbeddings` from `MODEL_CONFIG` (single source of truth for model + URL) |
-| `_load_documents_from_paths()` | Loads files by extension: PDF, MD, TXT, CSV, DOCX, RST, RTF, LOG, JSON |
-| `index_new_files()` | **Incremental** — only indexes files where `file_memory.indexed=0`. Adds to existing FAISS index. |
-| `rebuild_full_index()` | Resets all `indexed` flags, deletes index files, rebuilds from scratch |
-| `get_unindexed_files()` | DB helper: `SELECT ... WHERE indexed=0` |
-| `mark_files_indexed()` | DB helper: batch `UPDATE indexed=1` |
+| **🪞 Mirror tab** | View the latest reflection and weave new ones on demand — no longer scheduler-only |
+| **⚙️ Settings tab** | Change familiar name and address title directly in the UI |
+| `mirror` command | Read the latest Mirror reflection from Scratch Post |
+| `address` command | Change how Grimalkin addresses you (`address captain`, `address old friend`, etc.) |
+| Opening line | Random flavor quote shown on each session start |
+| 7 new easter eggs | `meow`, `purr`, `sleep`, `feed me`, `who made you`, `bad cat`, `thank you` |
 
-### UI additions
-- **"Groom the Vault"** button (incremental index) in Vault tab
-- **"Full Rebuild"** button in Vault tab
-- Startup log now shows FAISS index status
+### Bug Fixes
 
-### What was dropped from indexer.py
-- Emoji print statements (replaced with `log.info`)
-- Hardcoded `knowledge/` path (now uses `VAULT_DIR` + `SORTED_BASE` via `file_memory.sorted_path`)
-- Hardcoded `EMBEDDING_MODEL` (now reads `MODEL_CONFIG["embed_model"]`)
-- Hardcoded Ollama URL (now reads `MODEL_CONFIG["base_url"]`)
-- `DirectoryLoader` glob scanning (replaced with DB-driven `get_unindexed_files` — only loads files we've actually sorted)
-- Full rebuild as the only mode (now incremental-first, rebuild on demand)
+| Fix | Detail |
+|-----|--------|
+| `describe_node` hardcoded "Seven" | Thread count now reflects actual relationships |
+| `find_clusters` hardcoded intro | No longer says "Seventeen names dance" regardless of data |
+| `generate_weekly_reflection` system prompt | Now uses current `pet_name` instead of hardcoded "Grimalkin" |
+| `OllamaEmbeddings` import | Tries `langchain_ollama` first, falls back to `langchain_community` for forward compatibility |
+| `PERSONA_SYSTEM` global removed | Was a stale module-level variable; replaced with inline `build_persona()` call at usage site |
 
-## Structural Improvements
+---
 
-| Change | Why |
-|--------|-----|
-| `DEFAULTS` dict at top | All magic numbers in one place (bond values, intervals, FAISS chunk sizes, etc.) |
-| `_FEEDBACK_TYPE_MAP` at module level | Was inline in `handle_feedback()` — now discoverable and editable |
-| `INDEXABLE_EXTENSIONS` set | Documents which file types the Vault can actually read |
-| `DUPLICATES` category folder | Created by `ensure_dirs()` |
-| PEP 8 imports (one per line) | Clean `git blame` |
-| `idx_fm_indexed` and `idx_briefing_date` indexes | Added to `init_db()` for query performance |
-| `_VS_LOCK` is `RLock` | Prevents deadlock when `index_new_files` → `_load_vectorstore` (nested lock acquisition) |
+## v4.0 — The Veil Lifts
 
-## New Dependencies (pip install)
+The Loom came alive. The Mirror began forming. The cat got a name.
 
-The FAISS/RAG features require these. The app runs fine without them — it just can't index or search:
+### New Features
 
-```
-pip install langchain-ollama langchain-community langchain-text-splitters faiss-cpu pypdf
-```
+| Feature | Description |
+|---------|-------------|
+| **🪞 The Mirror** | Weekly reflections generated from vault activity and stored in `reflections` table |
+| **`pet_name` setting** | Rename your familiar with `name <new_name>` — persists across sessions |
+| **`build_persona(name)`** | Dynamic system prompt builder using current familiar name |
+| **🕸️ The Loom** | Force-directed knowledge graph visualization with Plotly + HTML fallback |
+| `spring_layout()` | Pure NumPy force-directed layout — no networkx dependency |
+| `describe_node()` | Entity deep-dive: type, sightings, all connected threads |
+| `find_clusters()` | Surface the most densely connected entity pairs |
+| `export_loom_markdown()` | Dump the full web to a markdown file in sorted/ |
+| `merge_entity()` | Canonicalize duplicate entities, dedup relationships |
+| `set_entity_importance()` | Flag entities as important (★ in listings) |
+| `forget_entity()` | Remove an entity and all its relationships |
+| `recall` command | Cross-source synthesis: files + graph + past reflections |
+| `proactive_whispers()` | Bond ≥ 60 unlocks proactive entity insights in Whispers |
+| `migrate_v4()` | Adds `reflections` table and `importance` column via safe ALTER TABLE |
 
-Optional for `.docx` support:
-```
-pip install docx2txt
-```
+---
 
-## LOC Budget
+## v3.0 — The Pyre and The Web
 
-| Component | Before | After |
-|-----------|--------|-------|
-| grimalkin.py | 722 | 983 |
-| indexer.py | 67 | 0 (folded in) |
-| **Total** | **789** | **983** |
-| Net new LOC | — | **+194** |
+Fire and memory. Files could be destroyed. Entities could be known.
 
-Still well under the 2000 LOC pain threshold for a single file.
+### New Features
+
+| Feature | Description |
+|---------|-------------|
+| **🔥 The Pyre** | Ritual file deletion: 3-step ceremony, bond gate (≥ 30), name confirmation |
+| 7-day ash cooling | Files move to `sorted/PYRE/` and sit for 7 days before permanent deletion |
+| `unburn` command | Rescue files from the Pyre before cremation |
+| **Knowledge Graph** | Entity + relationship extraction via LLM during nightly groom |
+| `entities`, `stats` commands | Graph visibility from Scratch Post |
+| Nightly groom | Automated tag/note/entity extraction on a 24h scheduler |
+| `groom` command | Trigger nightly groom manually |
+| Custom categories | User-defined sort categories stored in settings |
+| `migrate_v3()` | Adds `entities`, `relationships` tables; `burned_at` column on `file_memory` |
+| `PYRE` + `DUPLICATES` folders | Created automatically by `ensure_dirs()` |
+
+---
+
+## v2.1 — Hybrid Search
+
+The vault got smarter. Keyword blindness was fixed.
+
+### Changes
+
+| Change | Description |
+|--------|-------------|
+| `keyword_search()` | Multi-term OR matching — "ARGUS whitepaper" now finds files with either word |
+| `hybrid_vault_rag()` | Merged FAISS semantic + keyword results with score boosting |
+| `ingest` command | Discover and index orphan files already present in sorted/ |
+| `index` command | Re-index files that failed or were skipped on first pass |
+| Removed `route_vault_query` | Was a passthrough wrapper; inlined into callers |
+
+---
+
+## v2.0 — The Full Rebuild
+
+Single file. One database. One cat. Everything that came before was practice.
+
+**Source:** `grimalkin.py` (722 LOC) + `indexer.py` (67 LOC) → `grimalkin.py` (983 LOC)
+
+### Bug Fixes
+
+| # | Fix | Severity |
+|---|-----|----------|
+| 1 | UTC/local time mismatch in `generate_whispers` | HIGH |
+| 2 | 6 bare `except:` → `except Exception:` across all modules | HIGH |
+| 3 | Duplicate files moved to `sorted/DUPLICATES/` instead of silently deleted | HIGH |
+| 4 | Qwen3 `<think>` tag stripping in `scrub_corporate()` | HIGH |
+| 5 | `_call_openai` URL double-`/v1` bug | MEDIUM |
+| 6 | `on_upload` hashes source before copy | MEDIUM |
+| 7 | `log_interaction` bond bump now atomic within `_DB_LOCK` | MEDIUM |
+| 8 | WAL + `synchronous=NORMAL` set per-connection, not just at init | MEDIUM |
+| 9 | Symlinks skipped in `run_hunt` | LOW |
+| 10 | `hash_file` size gate: files >500 MB use fast fingerprint | LOW |
+
+### Structural Changes
+
+- Lazy FAISS index loading — loads on first query, not at startup
+- `DEFAULTS` dict: all magic numbers in one place
+- `INDEXABLE_EXTENSIONS` set: explicit declaration of what the vault can read
+- Bond system: every interaction increments bond (0–100)
+- Whispers: daily briefings with bond-gated detail levels
+- `idx_fm_indexed` and `idx_briefing_date` indexes for query performance
+- `_VS_LOCK` as `RLock` to prevent deadlock on nested lock acquisition

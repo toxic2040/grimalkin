@@ -1,4 +1,4 @@
-![Grimalkin](grimalkin.jpg)
+![Grimalkin](grimalkin_avatar.jpg)
 
 **Your private AI familiar — fully local, fully yours**
 
@@ -7,10 +7,11 @@
 [![FAISS](https://img.shields.io/badge/FAISS-000000?logo=faiss&logoColor=white)](https://github.com/facebookresearch/faiss)
 [![Gradio](https://img.shields.io/badge/Gradio-FF8C00?logo=gradio&logoColor=white)](https://gradio.app)
 [![MIT License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![X](https://img.shields.io/badge/X-%40toxic2040-000000?logo=x&logoColor=white)](https://x.com/toxic2040)
 
 ---
 
-**Single-file · ~1760 LOC · 100% offline · Ollama + FAISS + Knowledge Graph**
+**Single-file · ~1878 LOC · 100% offline · Ollama + FAISS + Knowledge Graph**
 
 Grimalkin is a local AI familiar that sorts your files, indexes them for instant Q&A, builds a knowledge graph of everything it finds, and judges you silently. No cloud, no API keys, no tracking. One Python file, one database, one cat.
 
@@ -28,7 +29,9 @@ Grimalkin is a local AI familiar that sorts your files, indexes them for instant
 
 **🕸️ The Loom** — Interactive knowledge graph visualization. Entities and relationships extracted from your files, rendered as a force-directed network. Filter by type, search by name, export to markdown.
 
-**🪞 The Mirror** — Weekly reflections generated from vault activity and graph growth. Grimalkin develops memory across time.
+**🪞 The Mirror** — Weekly reflections generated from vault activity and graph growth. View past reflections and weave new ones directly from the tab. Grimalkin develops memory across time.
+
+**⚙️ Settings** — Change your familiar's name and how it addresses you. No config files, no restarts.
 
 ## Stack
 
@@ -81,6 +84,11 @@ Open **http://localhost:7860** in your browser. The cat is waiting.
 | `bond` | Check your bond level |
 | `stats` | Vault statistics |
 | `entities` | List top entities in the knowledge graph |
+| `mirror` | Read the latest Mirror reflection |
+| `categories` | List all file categories |
+| `unburn <hash>` | Restore a file from the Pyre |
+| `name <new_name>` | Rename your familiar |
+| `address <title>` | Change how Grimalkin addresses you |
 | `merge "A" "B"` | Canonicalize two entity names into one |
 | `important Name` | Flag an entity as important |
 | `forget Name` | Delete an entity and all its relationships |
@@ -97,6 +105,8 @@ Open **http://localhost:7860** in your browser. The cat is waiting.
 
 **Bond system:** Every interaction increments your bond level (0–100). Higher bond unlocks features: Pyre access at 30, graph stats in Whispers at 40, proactive insights at 60.
 
+**The Mirror:** Weekly reflections are generated automatically during the nightly groom cycle, or on demand from The Mirror tab. Each reflection synthesizes vault activity, graph growth, and top entities into a 2–3 sentence entry in Grimalkin's voice, stored permanently in the database.
+
 ## Supported File Types
 
 **Full indexing:** PDF, TXT, MD, HTML, CSV, DOCX, DOC, Python, JavaScript, TypeScript, Shell, C/C++, Java, Go, Rust, Ruby, Perl, Lua, Swift, Kotlin, TOML, JSON, YAML, XML, INI, CFG, RTF, LOG
@@ -107,10 +117,12 @@ Open **http://localhost:7860** in your browser. The cat is waiting.
 
 ```
 grimalkin/
-├── grimalkin.py          # The entire application (~1760 LOC)
+├── grimalkin.py          # The entire application (~1878 LOC)
 ├── grimalkin.jpg         # Hero image
+├── grimalkin_avatar.jpg  # Avatar / social icon
 ├── grimalkin.db          # SQLite database (created on first run)
 ├── requirements.txt
+├── LICENSE
 ├── sorted/               # Organized files (created on first run)
 │   ├── FINANCIAL/
 │   ├── PERSONAL/

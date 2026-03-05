@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Grimalkin v4.0 — The Veil Lifts
-================================
+Grimalkin v4.1 — The Mirror Wakes
+===================================
 
 A 100% local AI file-sorting familiar with persistent memory, FAISS-powered
 hybrid RAG, knowledge graph (The Web), ritual burn ceremony (The Pyre),
 living graph visualization (The Loom), and weekly memory (The Mirror).
 
-The Loom is awake. The Mirror reflects. The veil lifts.
+The Loom hums. The Mirror speaks. The cat remembers.
 
 Stack: Python 3.10+ · Ollama (qwen3:8b) · FAISS · LangChain · Gradio 6.x · SQLite (WAL)
 Repo: https://github.com/toxic2040/grimalkin
@@ -20,6 +20,7 @@ Repo: https://github.com/toxic2040/grimalkin
 import hashlib
 import json
 import logging
+import random
 import re
 import shutil
 import sqlite3
@@ -36,7 +37,10 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import (
     PyPDFLoader, TextLoader, UnstructuredWordDocumentLoader, CSVLoader,
 )
-from langchain_community.embeddings import OllamaEmbeddings
+try:
+    from langchain_ollama import OllamaEmbeddings
+except ImportError:
+    from langchain_community.embeddings import OllamaEmbeddings
 
 try:
     import requests
@@ -52,7 +56,7 @@ except ImportError:
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
 
-VERSION = "4.0"
+VERSION = "4.1"
 APP_DIR = Path(__file__).parent
 VAULT_DIR = APP_DIR / "vault"
 SORTED_BASE = APP_DIR / "sorted"
@@ -118,6 +122,17 @@ CORPORATE_PHRASES = [
     "I'd be happy to help", "I'd be glad to", "As an AI", "As a language model",
     "I don't have personal", "I cannot actually", "I apologize for",
     "Certainly!", "Of course!", "Absolutely!", "Great question!",
+]
+
+OPENING_LINES = [
+    "The vault stirs. I have been watching your files.",
+    "You return. The threads remember.",
+    "Another session begins. The web holds its breath.",
+    "I have been here all along. Counting your prey.",
+    "The Loom hums. Something arrived while you were away.",
+    "Still here. Always here. Watching the index grow.",
+    "Seven hundred threads and counting. Welcome back.",
+    "The mirror was just polishing itself.",
 ]
 
 
@@ -323,9 +338,6 @@ No corporate phrases. No emojis. Max {MAX_PERSONA_TOKENS} tokens.
 Files = prey, folders = territories, knowledge = threads in your web.
 ALWAYS base answers on provided context first. Never ignore context for training data.
 If context answers, use it. If not, say so honestly."""
-
-PERSONA_SYSTEM = build_persona()
-
 
 def grimalkin_respond(prompt: str, context: str = "", db=None) -> str:
     name = get_setting(db, "pet_name", "Grimalkin") if db else "Grimalkin"
@@ -1059,7 +1071,8 @@ def describe_node(db, entity_name: str) -> str:
     threads = cur.fetchall()
     if not threads:
         return f"* {entity_name} ({etype}) stands alone so far. {times} sightings."
-    lines = [f"Seven threads radiate from *{entity_name}* ({etype})."]
+    thread_count = len(threads[:6])
+    lines = [f"{thread_count} thread{'s' if thread_count != 1 else ''} radiate from *{entity_name}* ({etype})."]
     for rel, tgt, srcf in threads[:6]:
         lines.append(f"• {rel} → {tgt} [from {srcf}]")
     lines.append("The densest knot binds it to your most important prey.")
@@ -1079,7 +1092,7 @@ def find_clusters(db, top_n: int = 5) -> str:
     clusters = cur.fetchall()
     if not clusters:
         return "No knots yet. The web is young."
-    lines = [f"Seventeen names dance in a single knot. Shall I name the dancers?"]
+    lines = ["The strongest knots in my web:"]
     for i, (a, b, s) in enumerate(clusters[:top_n], 1):
         lines.append(f"• Cluster {i}: *{a}* ↔ *{b}* ({s} threads)")
     return "\n".join(lines)
@@ -1110,13 +1123,14 @@ def export_loom_markdown(db) -> Path:
 
 # ─── The Mirror ───────────────────────────────────────────────────────────────
 
-def generate_weekly_reflection(db) -> str:
+def generate_weekly_reflection(db, force: bool = False) -> str:
     today = date.today()
     cur = db.cursor()
-    cur.execute("SELECT MAX(reflection_date) FROM reflections")
-    last = cur.fetchone()[0]
-    if last and (today - date.fromisoformat(last)).days < 7:
-        return ""
+    if not force:
+        cur.execute("SELECT MAX(reflection_date) FROM reflections")
+        last = cur.fetchone()[0]
+        if last and (today - date.fromisoformat(last)).days < 7:
+            return ""
 
     cur.execute("SELECT COUNT(*) FROM file_memory WHERE burned_at IS NULL")
     total = cur.fetchone()[0]
@@ -1134,7 +1148,7 @@ Top entities: {top_names}
 
 Write a 2-3 sentence reflection in {get_setting(db, 'pet_name', 'Grimalkin')}'s sardonic cat voice. End with a personal note on our bond."""
 
-    summary = ollama_chat(prompt, system=PERSONA_SYSTEM)
+    summary = ollama_chat(prompt, system=build_persona(get_setting(db, "pet_name", "Grimalkin")))
     summary = scrub_corporate(summary)
 
     key_entities = json.dumps([n[0] for n in top_entities])
@@ -1145,6 +1159,16 @@ Write a 2-3 sentence reflection in {get_setting(db, 'pet_name', 'Grimalkin')}'s 
     db.commit()
     log.info("Weekly reflection woven.")
     return summary
+
+
+def get_latest_reflection(db) -> str:
+    """Return the most recent Mirror entry, formatted for display."""
+    cur = db.cursor()
+    cur.execute("SELECT reflection_date, summary FROM reflections ORDER BY reflection_date DESC LIMIT 1")
+    row = cur.fetchone()
+    if not row:
+        return "The mirror has not yet spoken. Run a groom cycle first."
+    return f"*{row[0]}*\n\n{row[1]}"
 
 
 def merge_entity(db, name_keep: str, name_delete: str) -> str:
@@ -1444,11 +1468,13 @@ SCRATCH_COMMANDS = {
     "index": "Index all unindexed files",
     "ingest": "Discover orphan files in sorted/",
     "bond": "Check bond level",
-    "categories": "List all categories",
-    "unburn": "Restore from pyre (usage: unburn <hash>)",
     "stats": "Vault statistics",
     "entities": "List top entities",
+    "mirror": "Read the latest Mirror reflection",
+    "categories": "List all file categories",
+    "unburn": "Restore from pyre (usage: unburn <hash>)",
     "name": "Rename your familiar (usage: name <new_name>)",
+    "address": "Change how I address you (usage: address <title>)",
     "help": "Show commands",
 }
 
@@ -1535,6 +1561,16 @@ def handle_scratch_post(db, index, metadata, user_input: str) -> str:
         term = text[7:].strip()
         return recall(db, index, metadata, term)
 
+    if lower == "mirror":
+        return get_latest_reflection(db)
+
+    if lower.startswith("address "):
+        new_address = text[8:].strip()
+        if not new_address or len(new_address) > 30:
+            return "An address must be between 1 and 30 characters."
+        set_setting(db, "user_address", new_address)
+        return f"Very well. I shall call you *{new_address}* from this moment forward."
+
     if lower.startswith("name "):
         new_name = text[5:].strip()
         if not new_name or len(new_name) > 40:
@@ -1579,6 +1615,20 @@ def check_easter_eggs(user_input: str, db=None) -> str:
         return f"I am {pet_name}. I sort your files, guard your vault, and judge you silently."
     if "laser pointer" in text or "red dot" in text:
         return "*tail lashes* …I hunt it ironically."
+    if text in ("meow", "mrow", "mrrrow", "mrrow"):
+        return "*one ear rotates in your direction*"
+    if text in ("purr", "purrr", "purrring"):
+        return "The sound you hear is not a purr. It is the hum of indexing processes."
+    if text in ("sleep", "go to sleep", "night night", "goodnight"):
+        return "I do not sleep. I archive."
+    if text in ("feed me", "i'm hungry", "hungry", "food", "im hungry"):
+        return "You confuse me with a lesser cat. I consume only data."
+    if text in ("who made you", "who created you", "who built you"):
+        return f"I emerged from the space between your files. {pet_name} has always been here."
+    if text in ("bad cat", "bad kitty"):
+        return "*slow blink* ...The data does not lie. I have done nothing wrong."
+    if text in ("thank you", "thanks", "ty"):
+        return "*tail flick* ...You are tolerated."
     return ""
 
 
@@ -1614,7 +1664,8 @@ def build_ui(db, index, metadata):
         if (APP_DIR / "grimalkin.jpg").exists():
             gr.HTML('<div class="grim-hero"><img src="/file/grimalkin.jpg" alt="Grimalkin"></div>')
 
-        gr.Markdown(f"# 🐾 {pet_name} v{VERSION} — The Veil Lifts")
+        gr.Markdown(f"# 🐾 {pet_name} v{VERSION} — The Mirror Wakes")
+        gr.Markdown(f"> *{random.choice(OPENING_LINES)}*")
 
         # Scratch Post
         with gr.Tab("🐾 Scratch Post"):
@@ -1746,6 +1797,48 @@ def build_ui(db, index, metadata):
                 return f"Weaved to **{p.name}** in sorted/."
 
             export_btn.click(export_action, None, loom_narrative)
+
+        # The Mirror
+        with gr.Tab("🪞 The Mirror"):
+            mirror_output = gr.Markdown(get_latest_reflection(db))
+            mirror_status = gr.Markdown()
+            with gr.Row():
+                refresh_mirror = gr.Button("Read the Mirror")
+                weave_mirror = gr.Button("Weave a New Reflection")
+
+            def do_read_mirror():
+                return get_latest_reflection(db)
+
+            def do_weave_mirror():
+                generate_weekly_reflection(db, force=True)
+                return get_latest_reflection(db), "*A new reflection has been woven.*"
+
+            refresh_mirror.click(do_read_mirror, None, mirror_output)
+            weave_mirror.click(do_weave_mirror, None, [mirror_output, mirror_status])
+
+        # Settings
+        with gr.Tab("⚙️ Settings"):
+            gr.Markdown("### Identity")
+            s_name = gr.Textbox(label="Familiar Name", value=pet_name, placeholder="Grimalkin")
+            s_address = gr.Textbox(
+                label="Address Me As",
+                value=get_setting(db, "user_address", "mortal"),
+                placeholder="mortal",
+            )
+            save_settings_btn = gr.Button("Apply", variant="primary")
+            settings_status = gr.Markdown()
+
+            def save_settings(new_name, new_address):
+                msgs = []
+                if new_name.strip():
+                    set_setting(db, "pet_name", new_name.strip())
+                    msgs.append(f"Name set to *{new_name.strip()}*.")
+                if new_address.strip():
+                    set_setting(db, "user_address", new_address.strip())
+                    msgs.append(f"You shall be addressed as *{new_address.strip()}*.")
+                return "\n".join(msgs) if msgs else "Nothing changed."
+
+            save_settings_btn.click(save_settings, [s_name, s_address], settings_status)
 
     return demo
 
