@@ -30,6 +30,23 @@ from datetime import datetime, timezone, date
 from pathlib import Path
 from threading import Thread
 
+# ─── Dependency Pre-flight ─────────────────────────────────────────────────────
+
+_REQUIRED = [
+    ("faiss-cpu",                  "faiss"),
+    ("gradio>=5.0",                "gradio"),
+    ("numpy",                      "numpy"),
+    ("langchain-text-splitters",   "langchain_text_splitters"),
+    ("langchain-community",        "langchain_community"),
+]
+_missing = [pkg for pkg, mod in _REQUIRED if __import__("importlib").util.find_spec(mod) is None]
+if _missing:
+    print("\nGrimalkin cannot wake — missing dependencies:")
+    for pkg in _missing:
+        print(f"  • {pkg}")
+    print("\nFix:  pip install -r requirements.txt\n")
+    raise SystemExit(1)
+
 import faiss
 import gradio as gr
 import numpy as np

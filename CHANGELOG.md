@@ -21,6 +21,7 @@
 
 | Fix | Detail |
 |-----|--------|
+| Dependency pre-flight check | Missing packages now print a clean install message and exit instead of a raw traceback |
 | `describe_node` hardcoded "Seven" | Thread count now reflects actual relationships |
 | `find_clusters` hardcoded intro | No longer says "Seventeen names dance" regardless of data |
 | `generate_weekly_reflection` system prompt | Now uses current `pet_name` instead of hardcoded "Grimalkin" |
