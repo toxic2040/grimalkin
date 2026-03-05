@@ -1623,7 +1623,7 @@ def check_easter_eggs(user_input: str, db=None) -> str:
     text = user_input.strip().lower()
     pet_name = get_setting(db, "pet_name", "Grimalkin") if db else "Grimalkin"
     if text in ("pspsps", "psps", "here kitty"):
-        return f"*ears swivel toward the sound, one eye opens* …I was not asleep. I was indexing."
+        return "*ears swivel toward the sound, one eye opens* …I was not asleep. I was indexing."
     if text in ("good cat", "good kitty", "good boy"):
         return "*slow blink* …I accept your tribute."
     if "catnip" in text:
