@@ -282,6 +282,39 @@ def migrate_v4(db):
     log.info("v4.0 migrations complete — Loom and Mirror ready.")
 
 
+def migrate_v5(db):
+    """v5.0-exp: Generation telemetry + audit log for sparse-law instrumentation."""
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS generation_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            query_text TEXT,
+            query_type TEXT,
+            r_gen REAL,
+            h_bar REAL,
+            h_min REAL,
+            h_max REAL,
+            n_tokens INTEGER,
+            faiss_dist_mean REAL,
+            faiss_dist_min REAL,
+            top_k_used INTEGER,
+            response_length INTEGER,
+            model TEXT
+        );
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            event_type TEXT,
+            detail TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_genlog_type ON generation_log(query_type);
+        CREATE INDEX IF NOT EXISTS idx_genlog_ts ON generation_log(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(timestamp);
+    """)
+    db.commit()
+    log.info("v5.0-exp migrations complete — generation telemetry + audit log ready.")
+
+
 # ─── Directory Setup ───────────────────────────────────────────────────────────
 
 def ensure_dirs(db=None):
@@ -327,7 +360,74 @@ def bond_title(level: int) -> str:
 
 # ─── Ollama Interface ─────────────────────────────────────────────────────────
 
+import math
+
+def _compute_token_entropy(top_logprobs: list[dict]) -> float:
+    """Compute Shannon entropy H = -sum(p * ln(p)) from top logprobs."""
+    probs = []
+    for entry in top_logprobs:
+        lp = entry.get("logprob", -20.0)
+        probs.append(math.exp(lp))
+    total = sum(probs)
+    if total <= 0:
+        return 0.0
+    h = 0.0
+    for p in probs:
+        p_norm = p / total
+        if p_norm > 0:
+            h -= p_norm * math.log(p_norm)
+    return h
+
+
+def compute_generation_metrics(logprob_content: list) -> dict:
+    """Compute per-generation metrics from logprob data.
+
+    Returns {r_gen, h_bar, h_min, h_max, n_tokens} — the core
+    sparse-law telemetry.  r_gen is the entropy tail ratio
+    p90(H_i) / p10(H_i), the direct analog of the DTN duration
+    tail ratio.
+    """
+    entropies = []
+    for token_data in logprob_content:
+        top_lp = token_data.get("top_logprobs", [])
+        if top_lp:
+            entropies.append(_compute_token_entropy(top_lp))
+
+    if len(entropies) < 3:
+        return {"r_gen": 0.0, "h_bar": 0.0, "h_min": 0.0, "h_max": 0.0, "n_tokens": len(entropies)}
+
+    entropies_sorted = sorted(entropies)
+    n = len(entropies_sorted)
+    p10 = entropies_sorted[max(0, int(n * 0.10))]
+    p90 = entropies_sorted[min(n - 1, int(n * 0.90))]
+    r_gen = p90 / p10 if p10 > 1e-9 else 0.0
+
+    return {
+        "r_gen": round(r_gen, 4),
+        "h_bar": round(sum(entropies) / n, 4),
+        "h_min": round(entropies_sorted[0], 4),
+        "h_max": round(entropies_sorted[-1], 4),
+        "n_tokens": n,
+    }
+
+
+def classify_query(text: str) -> str:
+    """Rule-based query type classifier for generation logging."""
+    lower = text.lower().strip()
+    if any(lower.startswith(w) for w in ("what is", "what are", "who is", "who are",
+                                          "when did", "where is", "define ", "how many")):
+        return "factual"
+    if any(lower.startswith(w) for w in ("find ", "search ", "show me", "list ", "hunt")):
+        return "search"
+    if any(lower.startswith(w) for w in ("write ", "compose ", "create ", "draft ", "imagine")):
+        return "creative"
+    if any(lower.startswith(w) for w in ("compare ", "analyze ", "why ", "explain ", "summarize")):
+        return "analytical"
+    return "general"
+
+
 def ollama_chat(prompt: str, system: str = "", model: str = OLLAMA_MODEL) -> str:
+    """Chat via OpenAI-compatible endpoint. Captures logprobs silently."""
     if not HAS_REQUESTS:
         return "Hrk. Hairball. The requests library is missing."
     messages = []
@@ -336,15 +436,30 @@ def ollama_chat(prompt: str, system: str = "", model: str = OLLAMA_MODEL) -> str
     messages.append({"role": "user", "content": prompt})
     try:
         resp = requests.post(
-            f"{OLLAMA_URL}/api/chat",
-            json={"model": model, "messages": messages, "stream": False},
+            f"{OLLAMA_URL}/v1/chat/completions",
+            json={
+                "model": model,
+                "messages": messages,
+                "stream": False,
+                "logprobs": True,
+                "top_logprobs": 5,
+            },
             timeout=120,
         )
         resp.raise_for_status()
-        return resp.json().get("message", {}).get("content", "").strip()
+        data = resp.json()
+        choice = data.get("choices", [{}])[0]
+        text = choice.get("message", {}).get("content", "").strip()
+        # Stash logprobs on the function for the caller to retrieve
+        lp_data = choice.get("logprobs", {})
+        ollama_chat._last_logprobs = lp_data.get("content", []) if lp_data else []
+        return text
     except Exception as e:
         log.error(f"Ollama error: {e}")
+        ollama_chat._last_logprobs = []
         return "Hrk. Hairball. Ollama is not responding."
+
+ollama_chat._last_logprobs = []
 
 
 def build_persona(name: str = "Grimalkin") -> str:
@@ -356,11 +471,48 @@ Files = prey, folders = territories, knowledge = threads in your web.
 ALWAYS base answers on provided context first. Never ignore context for training data.
 If context answers, use it. If not, say so honestly."""
 
+def _log_generation(db, prompt: str, metrics: dict, response_len: int,
+                     faiss_dists: list | None = None):
+    """Write a row to generation_log. Silent on failure."""
+    if not db:
+        return
+    try:
+        dist_mean = sum(faiss_dists) / len(faiss_dists) if faiss_dists else None
+        dist_min = min(faiss_dists) if faiss_dists else None
+        top_k = len(faiss_dists) if faiss_dists else 0
+        db.execute("""
+            INSERT INTO generation_log
+                (query_text, query_type, r_gen, h_bar, h_min, h_max,
+                 n_tokens, faiss_dist_mean, faiss_dist_min, top_k_used,
+                 response_length, model)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            prompt[:500], classify_query(prompt),
+            metrics.get("r_gen"), metrics.get("h_bar"),
+            metrics.get("h_min"), metrics.get("h_max"),
+            metrics.get("n_tokens"), dist_mean, dist_min, top_k,
+            response_len, OLLAMA_MODEL,
+        ))
+        db.commit()
+    except Exception as e:
+        log.error(f"Generation log failed: {e}")
+
+
+# Thread-local stash for FAISS distances from the most recent search
+_last_faiss_distances: list[float] = []
+
+
 def grimalkin_respond(prompt: str, context: str = "", db=None) -> str:
+    global _last_faiss_distances
     name = get_setting(db, "pet_name", "Grimalkin") if db else "Grimalkin"
     full_prompt = f"{context}\n\n{prompt}" if context else prompt
     raw = ollama_chat(full_prompt, system=build_persona(name))
-    return scrub_corporate(raw)
+    # Compute sparse-law metrics from logprobs
+    metrics = compute_generation_metrics(ollama_chat._last_logprobs)
+    clean = scrub_corporate(raw)
+    _log_generation(db, prompt, metrics, len(clean), _last_faiss_distances or None)
+    _last_faiss_distances = []
+    return clean
 
 
 # ─── File Hashing & Classification ────────────────────────────────────────────
@@ -509,7 +661,9 @@ def keyword_search(db, query: str, limit: int = 10) -> set[str]:
 
 def hybrid_vault_rag(db, index, metadata, query: str) -> str:
     """Hybrid keyword + semantic RAG."""
+    global _last_faiss_distances
     results = faiss_search(index, metadata, query, k=15)
+    _last_faiss_distances = [r.get("score", 0.0) for r in results]
     cur = db.cursor()
     valid = []
     for r in results:
@@ -1882,6 +2036,7 @@ def main():
     db = init_db()
     migrate_v3(db)
     migrate_v4(db)
+    migrate_v5(db)
     ensure_dirs(db)
     index, metadata = init_faiss()
 
