@@ -15,3 +15,13 @@ venv/
 *~
 .DS_Store
 Thumbs.db
+
+# Experiment / sparse-law scripts and results
+experiment_*.py
+batch_experiment.py
+experiment_*_results.json
+experiment_*_results*.json
+equalization_chunks.json
+
+# Claude Code local config
+.claude/
