@@ -11,9 +11,9 @@
 
 ---
 
-**Single-file · ~1878 LOC · 100% offline · Ollama + FAISS + Knowledge Graph**
+**~3500 LOC · 100% offline · Ollama + FAISS + Knowledge Graph**
 
-Grimalkin is a local AI familiar that sorts your files, indexes them for instant Q&A, builds a knowledge graph of everything it finds, and judges you silently. No cloud, no API keys, no tracking. One Python file, one database, one cat.
+Grimalkin is a local AI familiar that sorts your files, indexes them for instant Q&A, builds a knowledge graph of everything it finds, and develops a personality that sharpens the longer you spend together. No cloud, no API keys, no tracking. One database, one bond, one cat.
 
 ## What It Does
 
@@ -31,19 +31,19 @@ Grimalkin is a local AI familiar that sorts your files, indexes them for instant
 
 **🪞 The Mirror** — Weekly reflections generated from vault activity and graph growth. View past reflections and weave new ones directly from the tab. Grimalkin develops memory across time.
 
-**⚙️ Settings** — Change your familiar's name and how it addresses you. No config files, no restarts.
+**⚙️ Settings** — Name your familiar, set your title, upload an avatar, toggle sandbox mode, serious mode, graph injection, and custom categories. All runtime — no restarts.
 
 ## Stack
 
 | Component | Role |
 |-----------|------|
 | Python 3.10+ | Runtime |
-| [Ollama](https://ollama.com) | Local LLM inference (qwen3:8b) |
+| [Ollama](https://ollama.com) | Local LLM inference (qwen2.5:14b) |
 | FAISS | Vector similarity search |
-| LangChain | Document loading + text splitting |
+| LangChain + langchain-ollama | Document loading, text splitting, chat integration |
 | Gradio 6.x | Web UI |
 | SQLite (WAL) | Persistent storage — files, entities, relationships, settings |
-| Plotly *(optional)* | Interactive graph visualization in The Loom |
+| Plotly | Interactive graph visualization in The Loom |
 
 ## Quick Start
 
@@ -52,7 +52,7 @@ Grimalkin is a local AI familiar that sorts your files, indexes them for instant
 Download from [ollama.com](https://ollama.com), then pull the models:
 
 ```bash
-ollama pull qwen3:8b             # reasoning model
+ollama pull qwen2.5:14b          # reasoning model
 ollama pull nomic-embed-text     # embedding model
 ```
 
@@ -103,7 +103,9 @@ Open **http://localhost:7860** in your browser. The cat is waiting.
 
 **Knowledge graph:** The nightly groom extracts entities (people, orgs, dates, locations, amounts, topics) and relationships from file contents via LLM. These populate the `entities` and `relationships` tables, visualized in The Loom.
 
-**Bond system:** Every interaction increments your bond level (0–100). Higher bond unlocks features: Pyre access at 30, graph stats in Whispers at 40, proactive insights at 60.
+**Bond system:** Every interaction increments your bond level (0–100). Higher bond unlocks features: Pyre access at 30, graph stats in Whispers at 40, proactive insights at 60. Bond level also shapes personality — at Stranger she's aloof and feline; by Bonded she's sharp, opinionated, and fully present.
+
+**Personality:** Tiered persona system with bond-scaled voice, situational mood injection (time of day, vault state, burn history), and anti-corporate scrubbing. She progresses from cat to companion — not by getting bigger, but by waking up.
 
 **The Mirror:** Weekly reflections are generated automatically during the nightly groom cycle, or on demand from The Mirror tab. Each reflection synthesizes vault activity, graph growth, and top entities into a 2–3 sentence entry in Grimalkin's voice, stored permanently in the database.
 
@@ -117,29 +119,33 @@ Open **http://localhost:7860** in your browser. The cat is waiting.
 
 ```
 grimalkin/
-├── grimalkin.py          # The entire application (~1878 LOC)
-├── grimalkin.jpg         # Hero image
-├── grimalkin_avatar.jpg  # Avatar / social icon
-├── grimalkin.db          # SQLite database (created on first run)
+├── grimalkin.py              # Main application (~3500 LOC)
+├── grimalkin_core.py         # Engine — config, DB, bond, persona, search
+├── grimalkin_features.py     # Feature handlers — hunt, groom, pyre, mirror
+├── grimalkin_interfaces.py   # Gradio UI builder
+├── test_grimalkin.py         # Test suite
+├── grimalkin.jpg             # Hero image
+├── grimalkin_avatar.jpg      # Avatar / social icon
+├── grimalkin.db              # SQLite database (created on first run)
 ├── requirements.txt
 ├── LICENSE
-├── sorted/               # Organized files (created on first run)
+├── sorted/                   # Organized files (created on first run)
 │   ├── FINANCIAL/
 │   ├── PERSONAL/
 │   ├── RESEARCH/
 │   ├── MEDIA/
 │   ├── MISC/
-│   ├── PYRE/             # Burned files awaiting cremation
+│   ├── PYRE/                 # Burned files awaiting cremation
 │   └── DUPLICATES/
-├── faiss_index/          # FAISS vector index (created on first run)
-└── vault/                # Reserved for future use
+├── faiss_index/              # FAISS vector index (created on first run)
+└── vault/                    # Reserved for future use
 ```
 
 ## Requirements
 
 - Python 3.10+
-- Ollama running locally with `qwen3:8b` and `nomic-embed-text`
-- ~8 GB RAM recommended (for the 8B model)
+- Ollama running locally with `qwen2.5:14b` and `nomic-embed-text`
+- ~16 GB RAM recommended (for the 14B model)
 - Works on Linux, macOS, Windows (tested on Pop!_OS)
 
 ## License
