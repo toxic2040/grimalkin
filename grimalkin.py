@@ -80,7 +80,7 @@ except ImportError:
 # ─── Configuration ─────────────────────────────────────────────────────────────
 
 VERSION = "5.0"
-APP_DIR = Path(__file__).parent
+APP_DIR = Path(__file__).resolve().parent
 VAULT_DIR = APP_DIR / "vault"
 SORTED_BASE = APP_DIR / "sorted"
 FAISS_INDEX_DIR = APP_DIR / "faiss_index"
@@ -3253,9 +3253,9 @@ AVATAR_FALLBACK = APP_DIR / "grimalkin.jpg"
 def _get_avatar_src() -> str:
     """Return the Gradio file-serving URL for the avatar, or empty string."""
     if AVATAR_PATH.exists():
-        return f"/file={AVATAR_PATH}"
+        return f"/gradio_api/file={AVATAR_PATH}"
     if AVATAR_FALLBACK.exists():
-        return f"/file={AVATAR_FALLBACK}"
+        return f"/gradio_api/file={AVATAR_FALLBACK}"
     return ""
 
 
@@ -3492,6 +3492,7 @@ def main():
 
     start_scheduler(index, metadata)
 
+    gr.set_static_paths(paths=[str(APP_DIR)])
     demo = build_ui(db, index, metadata)
     demo.launch(server_name=CFG.host, server_port=CFG.port, share=False,
                 allowed_paths=[str(APP_DIR)])
