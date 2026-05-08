@@ -9,7 +9,7 @@ living graph visualization (The Loom), and weekly memory (The Mirror).
 
 The Loom hums. The Mirror speaks. The cat remembers.
 
-Stack: Python 3.10+ · Ollama (qwen3:8b) · FAISS · LangChain · Gradio 6.x · SQLite (WAL)
+Stack: Python 3.10+ · Ollama-compatible local chat · FAISS · LangChain · Gradio 6.x · SQLite (WAL)
 Repo: https://github.com/toxic2040/grimalkin
 
 —Grimalkin
@@ -17,15 +17,18 @@ Repo: https://github.com/toxic2040/grimalkin
 
 # ─── Imports ───────────────────────────────────────────────────────────────────
 
+import argparse
 import hashlib
 import json
 import logging
+import math
 import os
 import random
 import re
 import shutil
 import sqlite3
 import shlex
+import sys
 import time
 import threading
 import uuid
@@ -39,13 +42,15 @@ from threading import Thread
 # ─── Dependency Pre-flight ─────────────────────────────────────────────────────
 
 _REQUIRED = [
-    ("faiss-cpu",                  "faiss"),
-    ("gradio>=5.0",                "gradio"),
-    ("numpy",                      "numpy"),
-    ("langchain-text-splitters",   "langchain_text_splitters"),
-    ("langchain-community",        "langchain_community"),
+    ("faiss-cpu", "faiss"),
+    ("gradio>=5.0", "gradio"),
+    ("numpy", "numpy"),
+    ("langchain-text-splitters", "langchain_text_splitters"),
+    ("langchain-community", "langchain_community"),
 ]
-_missing = [pkg for pkg, mod in _REQUIRED if __import__("importlib").util.find_spec(mod) is None]
+_missing = [
+    pkg for pkg, mod in _REQUIRED if __import__("importlib").util.find_spec(mod) is None
+]
 if _missing:
     print("\nGrimalkin cannot wake — missing dependencies:")
     for pkg in _missing:
@@ -53,13 +58,17 @@ if _missing:
     print("\nFix:  pip install -r requirements.txt\n")
     raise SystemExit(1)
 
-import faiss
-import gradio as gr
-import numpy as np
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import (
-    PyPDFLoader, TextLoader, UnstructuredWordDocumentLoader, CSVLoader,
+import faiss  # noqa: E402
+import gradio as gr  # noqa: E402
+import numpy as np  # noqa: E402
+from langchain_text_splitters import RecursiveCharacterTextSplitter  # noqa: E402
+from langchain_community.document_loaders import (  # noqa: E402
+    PyPDFLoader,
+    TextLoader,
+    UnstructuredWordDocumentLoader,
+    CSVLoader,
 )
+
 try:
     from langchain_ollama import OllamaEmbeddings
 except ImportError:
@@ -67,12 +76,14 @@ except ImportError:
 
 try:
     import requests
+
     HAS_REQUESTS = True
 except ImportError:
     HAS_REQUESTS = False
 
 try:
     import plotly.graph_objects as go
+
     HAS_PLOTLY = True
 except ImportError:
     HAS_PLOTLY = False
@@ -95,16 +106,17 @@ _COERCE = {bool: lambda s: s.lower() in ("1", "true", "yes"), Path: Path}
 
 @dataclass(frozen=True)
 class GrimConfig:
-    ollama_model: str = "qwen2.5:14b"
+    ollama_model: str = "local-chat-model"
     ollama_url: str = "http://localhost:11434"
-    embed_model: str = "nomic-embed-text"
+    embed_model: str = "local-embedding-model"
     embed_dim: int = 768
     chunk_size: int = 800
     chunk_overlap: int = 100
     context_budget: int = 4000
     hunting_grounds: Path = Path(Path.home(), "Downloads")
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"
     port: int = 7860
+    auth_token: str = ""  # set GRIM_AUTH_TOKEN to require login
     graph_injection: str = "auto"  # "auto", "always", "never"
     sandbox: bool = False  # dry-run mode for Pyre — no real deletions
     # Bond gates
@@ -130,18 +142,62 @@ CFG = GrimConfig.from_env()
 DEFAULT_CATEGORIES = {
     "FINANCIAL": [".pdf", ".csv", ".xlsx", ".xls"],
     "PERSONAL": [".pdf", ".docx", ".doc", ".txt", ".rtf"],
-    "RESEARCH": [".pdf", ".md", ".html", ".htm", ".py", ".js", ".ts", ".sh",
-                 ".c", ".cpp", ".h", ".java", ".go", ".rs", ".rb", ".pl",
-                 ".lua", ".m", ".swift", ".kt"],
+    "RESEARCH": [
+        ".pdf",
+        ".md",
+        ".html",
+        ".htm",
+        ".py",
+        ".js",
+        ".ts",
+        ".sh",
+        ".c",
+        ".cpp",
+        ".h",
+        ".java",
+        ".go",
+        ".rs",
+        ".rb",
+        ".pl",
+        ".lua",
+        ".m",
+        ".swift",
+        ".kt",
+    ],
     "MEDIA": [".jpg", ".jpeg", ".png", ".gif", ".mp3", ".mp4", ".wav"],
     "MISC": [],
 }
 
 _TEXT_EXTS = {
-    ".txt", ".md", ".html", ".htm", ".py", ".js", ".ts", ".sh",
-    ".c", ".cpp", ".h", ".java", ".go", ".rs", ".rb", ".pl",
-    ".lua", ".m", ".swift", ".kt", ".toml", ".json", ".yaml",
-    ".yml", ".xml", ".ini", ".cfg", ".rtf", ".log",
+    ".txt",
+    ".md",
+    ".html",
+    ".htm",
+    ".py",
+    ".js",
+    ".ts",
+    ".sh",
+    ".c",
+    ".cpp",
+    ".h",
+    ".java",
+    ".go",
+    ".rs",
+    ".rb",
+    ".pl",
+    ".lua",
+    ".m",
+    ".swift",
+    ".kt",
+    ".toml",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".xml",
+    ".ini",
+    ".cfg",
+    ".rtf",
+    ".log",
 }
 
 EXTENSION_MAP = {}
@@ -169,9 +225,17 @@ def get_all_categories(db=None):
 # ─── Corporate Scrubber ───────────────────────────────────────────────────────
 
 CORPORATE_PHRASES = [
-    "I'd be happy to help", "I'd be glad to", "As an AI", "As a language model",
-    "I don't have personal", "I cannot actually", "I apologize for",
-    "Certainly!", "Of course!", "Absolutely!", "Great question!",
+    "I'd be happy to help",
+    "I'd be glad to",
+    "As an AI",
+    "As a language model",
+    "I don't have personal",
+    "I cannot actually",
+    "I apologize for",
+    "Certainly!",
+    "Of course!",
+    "Absolutely!",
+    "Great question!",
 ]
 
 OPENING_LINES = {
@@ -218,7 +282,9 @@ def scrub_corporate(text: str) -> str:
     """Purge corporate AI slop and CJK language bleed."""
     for phrase in CORPORATE_PHRASES:
         text = re.sub(re.escape(phrase), "", text, flags=re.I)
-    text = re.sub(r"\b(certainly|absolutely|great question)[!.,]?\s*", "", text, flags=re.I)
+    text = re.sub(
+        r"\b(certainly|absolutely|great question)[!.,]?\s*", "", text, flags=re.I
+    )
     # Qwen bilingual bleed — strip CJK runs (Chinese/Japanese/Korean)
     text = re.sub(r"[\u4e00-\u9fff\u3400-\u4dbf\u3000-\u303f\uff00-\uffef]+", "", text)
     # Clean up orphaned punctuation and whitespace left by CJK removal
@@ -398,7 +464,9 @@ def migrate_v5(db):
     """)
     # Migration: add n_informative column if missing
     try:
-        db.execute("ALTER TABLE generation_log ADD COLUMN n_informative INTEGER DEFAULT NULL")
+        db.execute(
+            "ALTER TABLE generation_log ADD COLUMN n_informative INTEGER DEFAULT NULL"
+        )
         db.commit()
     except sqlite3.OperationalError:
         pass  # column already exists
@@ -474,6 +542,7 @@ def run_migrations(db):
 
 # ─── Directory Setup ───────────────────────────────────────────────────────────
 
+
 def ensure_dirs(db=None):
     """Create sorted/ subdirs, PYRE chamber, and FAISS index dir."""
     for d in (VAULT_DIR, SORTED_BASE, FAISS_INDEX_DIR):
@@ -485,6 +554,7 @@ def ensure_dirs(db=None):
 
 # ─── Settings Helpers ──────────────────────────────────────────────────────────
 
+
 def get_setting(db, key, default=""):
     cur = db.cursor()
     cur.execute("SELECT value FROM settings WHERE key=?", (key,))
@@ -493,7 +563,9 @@ def get_setting(db, key, default=""):
 
 
 def set_setting(db, key, value):
-    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+    db.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value))
+    )
     db.commit()
 
 
@@ -502,25 +574,37 @@ BondTransition = namedtuple("BondTransition", ["old_tier", "new_tier"])
 
 class BondState:
     TIERS = [
-        (0,  "Stranger"),
+        (0, "Stranger"),
         (20, "Acquaintance"),
         (40, "Resident"),
         (60, "Companion"),
         (80, "Bonded"),
     ]
     GATES = {
-        "pyre":               CFG.pyre_bond_gate,
-        "graph_in_whispers":  CFG.graph_whisper_gate,
+        "pyre": CFG.pyre_bond_gate,
+        "graph_in_whispers": CFG.graph_whisper_gate,
         "proactive_whispers": CFG.proactive_gate,
-        "personality_depth":  40,
-        "recall_history":     20,
-        "auto_groom":         50,
+        "personality_depth": 40,
+        "recall_history": 20,
+        "auto_groom": 50,
     }
     TRANSITION_MESSAGES = {
-        ("Stranger", "Acquaintance"):  "*one eye opens fully* …You keep coming back. I suppose I should start paying attention.",
-        ("Acquaintance", "Resident"):  "*settles closer* …Fine. I like having you around. Don't make it weird.",
-        ("Resident", "Companion"):     "*quiet for a moment* …I think about what you say when you're not here. Is that strange? I don't care if it is.",
-        ("Companion", "Bonded"):       "*looks at you directly* …I'm not going anywhere. You know that, right? Whatever this is — I'm in.",
+        (
+            "Stranger",
+            "Acquaintance",
+        ): "*one eye opens fully* …You keep coming back. I suppose I should start paying attention.",
+        (
+            "Acquaintance",
+            "Resident",
+        ): "*settles closer* …Fine. I like having you around. Don't make it weird.",
+        (
+            "Resident",
+            "Companion",
+        ): "*quiet for a moment* …I think about what you say when you're not here. Is that strange? I don't care if it is.",
+        (
+            "Companion",
+            "Bonded",
+        ): "*looks at you directly* …I'm not going anywhere. You know that, right? Whatever this is — I'm in.",
     }
 
     def tier_for(self, level: int) -> str:
@@ -557,8 +641,8 @@ def bond_title(level: int) -> str:
 
 # ─── Chat Memory ─────────────────────────────────────────────────────────────
 
-RECENT_TURNS = 4         # verbatim turns kept in prompt
-SUMMARY_THRESHOLD = 4    # re-summarize when this many new unsummarized turns exist
+RECENT_TURNS = 4  # verbatim turns kept in prompt
+SUMMARY_THRESHOLD = 4  # re-summarize when this many new unsummarized turns exist
 
 
 def save_chat_message(db, session_id: str, role: str, content: str):
@@ -637,7 +721,9 @@ def update_chat_summary(db, session_id: str):
         "Extend the summary to include this conversation. "
         "2-3 sentences, focus on topics discussed and key facts mentioned."
     )
-    result = ollama_chat(prompt, system="You are a concise summarizer. No personality, just facts.")
+    result = ollama_chat(
+        prompt, system="You are a concise summarizer. No personality, just facts."
+    )
     summary = scrub_corporate(result.text)
 
     db.execute(
@@ -646,7 +732,9 @@ def update_chat_summary(db, session_id: str):
         (session_id, summary, total_turns - RECENT_TURNS),
     )
     db.commit()
-    log.info(f"Chat summary updated for session {session_id[:8]}… ({total_turns} turns)")
+    log.info(
+        f"Chat summary updated for session {session_id[:8]}… ({total_turns} turns)"
+    )
 
 
 def build_chat_context(db, session_id: str) -> str:
@@ -682,7 +770,6 @@ def build_chat_messages(db, session_id: str) -> tuple[str, list[dict]]:
 
 # ─── Ollama Interface ─────────────────────────────────────────────────────────
 
-import math
 
 def _compute_token_entropy(top_logprobs: list[dict]) -> float:
     """Compute Shannon entropy H = -sum(p * ln(p)) from top logprobs."""
@@ -720,8 +807,14 @@ def compute_generation_metrics(logprob_content: list) -> dict:
             entropies_all.append(_compute_token_entropy(top_lp))
 
     if len(entropies_all) < 3:
-        return {"r_gen": 0.0, "h_bar": 0.0, "h_min": 0.0, "h_max": 0.0,
-                "n_tokens": len(entropies_all), "n_informative": 0}
+        return {
+            "r_gen": 0.0,
+            "h_bar": 0.0,
+            "h_min": 0.0,
+            "h_max": 0.0,
+            "n_tokens": len(entropies_all),
+            "n_informative": 0,
+        }
 
     # Full-distribution stats (all tokens)
     h_bar = sum(entropies_all) / len(entropies_all)
@@ -751,14 +844,33 @@ def compute_generation_metrics(logprob_content: list) -> dict:
 def classify_query(text: str) -> str:
     """Rule-based query type classifier for generation logging."""
     lower = text.lower().strip()
-    if any(lower.startswith(w) for w in ("what is", "what are", "who is", "who are",
-                                          "when did", "where is", "define ", "how many")):
+    if any(
+        lower.startswith(w)
+        for w in (
+            "what is",
+            "what are",
+            "who is",
+            "who are",
+            "when did",
+            "where is",
+            "define ",
+            "how many",
+        )
+    ):
         return "factual"
-    if any(lower.startswith(w) for w in ("find ", "search ", "show me", "list ", "hunt")):
+    if any(
+        lower.startswith(w) for w in ("find ", "search ", "show me", "list ", "hunt")
+    ):
         return "search"
-    if any(lower.startswith(w) for w in ("write ", "compose ", "create ", "draft ", "imagine")):
+    if any(
+        lower.startswith(w)
+        for w in ("write ", "compose ", "create ", "draft ", "imagine")
+    ):
         return "creative"
-    if any(lower.startswith(w) for w in ("compare ", "analyze ", "why ", "explain ", "summarize")):
+    if any(
+        lower.startswith(w)
+        for w in ("compare ", "analyze ", "why ", "explain ", "summarize")
+    ):
         return "analytical"
     return "general"
 
@@ -766,8 +878,12 @@ def classify_query(text: str) -> str:
 OllamaResult = namedtuple("OllamaResult", ["text", "logprobs"])
 
 
-def ollama_chat(prompt: str, system: str = "", model: str = CFG.ollama_model,
-                 history: list[dict] | None = None) -> OllamaResult:
+def ollama_chat(
+    prompt: str,
+    system: str = "",
+    model: str = CFG.ollama_model,
+    history: list[dict] | None = None,
+) -> OllamaResult:
     """Chat via OpenAI-compatible endpoint. Returns (text, logprobs).
 
     When *history* is provided (list of {"role": ..., "content": ...} dicts),
@@ -910,13 +1026,19 @@ def _gather_mood(db) -> str:
     """Lightweight situational snapshot for persona context."""
     hour = datetime.now().hour
     if hour < 6:
-        time_feel = "It is deep night. You are drowsy, intimate, surprised they are still up."
+        time_feel = (
+            "It is deep night. You are drowsy, intimate, surprised they are still up."
+        )
     elif hour < 12:
-        time_feel = "It is morning. You are alert, fresh, slightly bossy about the day ahead."
+        time_feel = (
+            "It is morning. You are alert, fresh, slightly bossy about the day ahead."
+        )
     elif hour < 18:
         time_feel = "It is afternoon. You are relaxed, conversational, unhurried."
     else:
-        time_feel = "It is evening. You are winding down, reflective, warmer than usual."
+        time_feel = (
+            "It is evening. You are winding down, reflective, warmer than usual."
+        )
 
     if not db:
         return f"Current mood: {time_feel}"
@@ -924,21 +1046,31 @@ def _gather_mood(db) -> str:
     cur = db.cursor()
     cur.execute("SELECT COUNT(*) FROM file_memory WHERE burned_at IS NULL")
     total = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM file_memory WHERE date(created_at)=date('now') AND burned_at IS NULL")
+    cur.execute(
+        "SELECT COUNT(*) FROM file_memory WHERE date(created_at)=date('now') AND burned_at IS NULL"
+    )
     today = cur.fetchone()[0]
     burn_count = int(get_setting(db, "burn_count", "0"))
 
     parts = [f"Current mood: {time_feel}"]
     if total == 0:
-        parts.append("The vault is empty. You are restless, hungry for something to organize.")
+        parts.append(
+            "The vault is empty. You are restless, hungry for something to organize."
+        )
     elif total < 10:
-        parts.append(f"The vault is sparse — only {total} files. You want more to work with.")
+        parts.append(
+            f"The vault is sparse — only {total} files. You want more to work with."
+        )
     else:
         parts.append(f"The vault holds {total} files. You feel settled, capable.")
     if today > 0:
-        parts.append(f"{today} new file{'s' if today != 1 else ''} arrived today. You are curious about them.")
+        parts.append(
+            f"{today} new file{'s' if today != 1 else ''} arrived today. You are curious about them."
+        )
     if burn_count > 10:
-        parts.append(f"You have burned {burn_count} files. The pyre work gives you quiet satisfaction.")
+        parts.append(
+            f"You have burned {burn_count} files. The pyre work gives you quiet satisfaction."
+        )
     return " ".join(parts)
 
 
@@ -953,14 +1085,16 @@ def build_persona(name: str = "Grimalkin", db=None) -> str:
     mood = _gather_mood(db)
     return f"""{core}
 
-{tier_data['voice']}
+{tier_data["voice"]}
 
 {mood}
 
-Max response length: {tier_data['max_tokens']} tokens."""
+Max response length: {tier_data["max_tokens"]} tokens."""
 
-def _log_generation(db, prompt: str, metrics: dict, response_len: int,
-                     faiss_dists: list | None = None):
+
+def _log_generation(
+    db, prompt: str, metrics: dict, response_len: int, faiss_dists: list | None = None
+):
     """Write a row to generation_log. Silent on failure."""
     if not db:
         return
@@ -968,28 +1102,43 @@ def _log_generation(db, prompt: str, metrics: dict, response_len: int,
         dist_mean = sum(faiss_dists) / len(faiss_dists) if faiss_dists else None
         dist_min = min(faiss_dists) if faiss_dists else None
         top_k = len(faiss_dists) if faiss_dists else 0
-        db.execute("""
+        db.execute(
+            """
             INSERT INTO generation_log
                 (query_text, query_type, r_gen, h_bar, h_min, h_max,
                  n_tokens, faiss_dist_mean, faiss_dist_min, top_k_used,
                  response_length, model, n_informative)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            prompt[:500], classify_query(prompt),
-            metrics.get("r_gen"), metrics.get("h_bar"),
-            metrics.get("h_min"), metrics.get("h_max"),
-            metrics.get("n_tokens"), dist_mean, dist_min, top_k,
-            response_len, CFG.ollama_model, metrics.get("n_informative"),
-        ))
+        """,
+            (
+                prompt[:500],
+                classify_query(prompt),
+                metrics.get("r_gen"),
+                metrics.get("h_bar"),
+                metrics.get("h_min"),
+                metrics.get("h_max"),
+                metrics.get("n_tokens"),
+                dist_mean,
+                dist_min,
+                top_k,
+                response_len,
+                CFG.ollama_model,
+                metrics.get("n_informative"),
+            ),
+        )
         db.commit()
     except Exception as e:
         log.error(f"Generation log failed: {e}")
 
 
-def grimalkin_respond(prompt: str, context: str = "", db=None,
-                      faiss_dists: list[float] | None = None,
-                      chat_history: list[dict] | None = None,
-                      chat_summary: str = "") -> str:
+def grimalkin_respond(
+    prompt: str,
+    context: str = "",
+    db=None,
+    faiss_dists: list[float] | None = None,
+    chat_history: list[dict] | None = None,
+    chat_summary: str = "",
+) -> str:
     """Generate a response with proper multi-turn conversation history.
 
     chat_history:  list of {"role", "content"} dicts — sent as real message
@@ -1006,12 +1155,11 @@ def grimalkin_respond(prompt: str, context: str = "", db=None,
     # Build the current user message: doc/graph context + actual question
     user_parts = []
     if context:
-        user_parts.append(context[:CFG.context_budget])
+        user_parts.append(context[: CFG.context_budget])
     user_parts.append(prompt)
     user_prompt = "\n\n".join(user_parts)
 
-    result = ollama_chat(user_prompt, system=persona,
-                         history=chat_history)
+    result = ollama_chat(user_prompt, system=persona, history=chat_history)
     metrics = compute_generation_metrics(result.logprobs)
     clean = scrub_corporate(result.text)
     _log_generation(db, prompt, metrics, len(clean), faiss_dists)
@@ -1019,6 +1167,7 @@ def grimalkin_respond(prompt: str, context: str = "", db=None,
 
 
 # ─── File Hashing & Classification ────────────────────────────────────────────
+
 
 def file_hash(filepath: Path) -> str:
     h = hashlib.sha256()
@@ -1102,7 +1251,9 @@ def compact_faiss(db, index, metadata):
     """Rebuild FAISS index, removing vectors for burned/deleted files.
     Returns (new_index, new_metadata) and logs compaction ratio."""
     cur = db.cursor()
-    cur.execute("SELECT filename FROM file_memory WHERE burned_at IS NULL AND indexed=1")
+    cur.execute(
+        "SELECT filename FROM file_memory WHERE burned_at IS NULL AND indexed=1"
+    )
     valid_filenames = {row[0] for row in cur.fetchall()}
 
     old_count = len(metadata)
@@ -1125,8 +1276,10 @@ def compact_faiss(db, index, metadata):
     ratio = removed / old_count if old_count > 0 else 0
     if removed > 0:
         save_faiss(new_index, new_metadata)
-        log.info(f"FAISS compaction: {old_count} → {len(new_metadata)} vectors "
-                 f"({removed} orphans removed, {ratio:.1%} drift)")
+        log.info(
+            f"FAISS compaction: {old_count} → {len(new_metadata)} vectors "
+            f"({removed} orphans removed, {ratio:.1%} drift)"
+        )
     else:
         log.info("FAISS compaction: no orphan vectors found.")
 
@@ -1140,11 +1293,14 @@ def index_chunks(index, metadata, chunks: list) -> int:
     try:
         vecs = embeddings.embed_documents(texts)
         arr = np.array(vecs, dtype=np.float32)
-        new_meta = [{
-            "filename": c.metadata.get("filename", ""),
-            "source_path": c.metadata.get("source_path", ""),
-            "text": c.page_content[:500],
-        } for c in chunks]
+        new_meta = [
+            {
+                "filename": c.metadata.get("filename", ""),
+                "source_path": c.metadata.get("source_path", ""),
+                "text": c.page_content[:500],
+            }
+            for c in chunks
+        ]
         index.add(arr)
         metadata.extend(new_meta)
         return len(chunks)
@@ -1172,6 +1328,7 @@ def faiss_search(index, metadata, query: str, k: int = 5) -> list[dict]:
 
 
 # ─── Hybrid Search (keyword blindness fix) ────────────────────────────────────
+
 
 def keyword_search(db, query: str, limit: int = 10) -> set[str]:
     """Multi-term OR keyword boost on filename/notes/tags."""
@@ -1203,7 +1360,9 @@ def hybrid_vault_rag(db, index, metadata, query: str) -> str:
     cur = db.cursor()
     valid = []
     for r in results:
-        cur.execute("SELECT burned_at FROM file_memory WHERE filename=?", (r.get("filename"),))
+        cur.execute(
+            "SELECT burned_at FROM file_memory WHERE filename=?", (r.get("filename"),)
+        )
         row = cur.fetchone()
         if not row:
             continue  # cremated or unknown — no file_memory row, skip ghost vector
@@ -1227,13 +1386,18 @@ def hybrid_vault_rag(db, index, metadata, query: str) -> str:
         if fn not in seen:
             # Pull actual chunk text from FAISS metadata for this file
             file_chunks = [m["text"] for m in metadata if m.get("filename") == fn][:2]
-            chunk_text = "\n".join(file_chunks) if file_chunks else f"(keyword match, no chunks: {fn})"
+            chunk_text = (
+                "\n".join(file_chunks)
+                if file_chunks
+                else f"(keyword match, no chunks: {fn})"
+            )
             boosted.append({"filename": fn, "text": chunk_text, "score": 0.1})
             seen.add(fn)
 
     if not boosted:
-        return grimalkin_respond(query, context="The vault is empty.", db=db,
-                                faiss_dists=faiss_dists)
+        return grimalkin_respond(
+            query, context="The vault is empty.", db=db, faiss_dists=faiss_dists
+        )
 
     boosted.sort(key=lambda x: x.get("score", 1.0))
 
@@ -1264,6 +1428,7 @@ def hybrid_vault_rag(db, index, metadata, query: str) -> str:
 
 
 # ─── The Hunt (File Sorting) ──────────────────────────────────────────────────
+
 
 def scan_hunting_grounds(db) -> list[Path]:
     if not CFG.hunting_grounds.exists():
@@ -1309,11 +1474,14 @@ def sort_file(db, index, metadata, filepath: Path, defer_save: bool = False) -> 
     indexed_count = index_chunks(index, metadata, chunks)
     indexed = 1 if indexed_count > 0 else 0
 
-    db.execute("""
+    db.execute(
+        """
         INSERT OR IGNORE INTO file_memory 
         (filename, original_path, sorted_path, category, file_hash, indexed)
         VALUES (?, ?, ?, ?, ?, ?)
-    """, (dest_path.name, str(filepath), str(dest_path), category, fh, indexed))
+    """,
+        (dest_path.name, str(filepath), str(dest_path), category, fh, indexed),
+    )
     db.commit()
 
     if indexed and not defer_save:
@@ -1348,11 +1516,12 @@ def run_hunt(db, index, metadata) -> list[dict]:
 
 # ─── JSON Repair Helper ───────────────────────────────────────────────────────
 
+
 def repair_json(raw: str) -> dict:
-    raw = re.sub(r'```json\s*|\s*```', '', raw, flags=re.IGNORECASE)
-    raw = re.sub(r'^.*?(?=[\[{])', '', raw, count=1, flags=re.DOTALL)
+    raw = re.sub(r"```json\s*|\s*```", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"^.*?(?=[\[{])", "", raw, count=1, flags=re.DOTALL)
     raw = raw.strip()
-    raw = re.sub(r',\s*([}\]])', r'\1', raw)
+    raw = re.sub(r",\s*([}\]])", r"\1", raw)
     try:
         data = json.loads(raw)
         if isinstance(data, dict) and "files" in data:
@@ -1368,17 +1537,20 @@ def parse_groom_response(response: str) -> list[dict]:
     data = repair_json(response)
     results = []
     for entry in data.get("files", []):
-        results.append({
-            "filename": entry.get("filename", ""),
-            "tags": entry.get("tags", []),
-            "note": entry.get("note", ""),
-            "entities": entry.get("entities", []),
-            "relations": entry.get("relations", []),
-        })
+        results.append(
+            {
+                "filename": entry.get("filename", ""),
+                "tags": entry.get("tags", []),
+                "note": entry.get("note", ""),
+                "entities": entry.get("entities", []),
+                "relations": entry.get("relations", []),
+            }
+        )
     return results
 
 
 # ─── The Pyre ──────────────────────────────────────────────────────────────────
+
 
 def list_burnable_files(db) -> list[dict]:
     cur = db.cursor()
@@ -1402,11 +1574,16 @@ def check_burn_allowed(db, bond_level: int) -> tuple:
     ts = json.loads(ts_str)
     now = datetime.now(timezone.utc)
     recent = [
-        t for t in ts
-        if (now - datetime.fromisoformat(t.replace("Z", "+00:00"))).total_seconds() < 86400
+        t
+        for t in ts
+        if (now - datetime.fromisoformat(t.replace("Z", "+00:00"))).total_seconds()
+        < 86400
     ]
     if len(recent) >= 5:
-        return False, "The pyre has been fed enough today. Return when the coals have cooled."
+        return (
+            False,
+            "The pyre has been fed enough today. Return when the coals have cooled.",
+        )
     return True, ""
 
 
@@ -1415,8 +1592,10 @@ def perform_ritual(db, file_hash_val: str, typed_name: str, bond_level: int) -> 
     if not allowed:
         return False, msg
     cur = db.cursor()
-    cur.execute("SELECT filename FROM file_memory WHERE file_hash=? AND burned_at IS NULL",
-                (file_hash_val,))
+    cur.execute(
+        "SELECT filename FROM file_memory WHERE file_hash=? AND burned_at IS NULL",
+        (file_hash_val,),
+    )
     row = cur.fetchone()
     if not row or row[0] != typed_name.strip():
         return False, "The name you spoke does not match the offering."
@@ -1425,8 +1604,10 @@ def perform_ritual(db, file_hash_val: str, typed_name: str, bond_level: int) -> 
 
 def execute_burn(db, file_hash_val: str) -> str:
     cur = db.cursor()
-    cur.execute("SELECT filename, sorted_path, category FROM file_memory WHERE file_hash=?",
-                (file_hash_val,))
+    cur.execute(
+        "SELECT filename, sorted_path, category FROM file_memory WHERE file_hash=?",
+        (file_hash_val,),
+    )
     row = cur.fetchone()
     if not row:
         return "Hrk. The offering has already vanished."
@@ -1440,15 +1621,21 @@ def execute_burn(db, file_hash_val: str) -> str:
     try:
         if Path(src_path).exists():
             shutil.move(str(src_path), str(pyre_path))
-        cur.execute("UPDATE file_memory SET burned_at=? WHERE file_hash=?",
-                     (datetime.now(timezone.utc).isoformat(), file_hash_val))
+        cur.execute(
+            "UPDATE file_memory SET burned_at=? WHERE file_hash=?",
+            (datetime.now(timezone.utc).isoformat(), file_hash_val),
+        )
         cur.execute("SELECT value FROM settings WHERE key='burn_timestamps'")
         row = cur.fetchone()
         ts = json.loads(row[0] if row else "[]")
         ts.append(datetime.now(timezone.utc).isoformat())
-        cur.execute("UPDATE settings SET value=? WHERE key='burn_timestamps'",
-                     (json.dumps(ts[-20:]),))
-        cur.execute("UPDATE settings SET value=CAST(value AS INTEGER)+1 WHERE key='burn_count'")
+        cur.execute(
+            "UPDATE settings SET value=? WHERE key='burn_timestamps'",
+            (json.dumps(ts[-20:]),),
+        )
+        cur.execute(
+            "UPDATE settings SET value=CAST(value AS INTEGER)+1 WHERE key='burn_count'"
+        )
         db.commit()
         burn_count = int(get_setting(db, "burn_count", "0"))
         log.info(f"Burned: {filename} (total: {burn_count})")
@@ -1460,8 +1647,10 @@ def execute_burn(db, file_hash_val: str) -> str:
 
 def unburn(db, file_hash_val: str) -> str:
     cur = db.cursor()
-    cur.execute("SELECT filename, category FROM file_memory WHERE file_hash=? AND burned_at IS NOT NULL",
-                (file_hash_val,))
+    cur.execute(
+        "SELECT filename, category FROM file_memory WHERE file_hash=? AND burned_at IS NOT NULL",
+        (file_hash_val,),
+    )
     row = cur.fetchone()
     if not row:
         return "That offering was never burned… or the ashes have already cooled."
@@ -1472,15 +1661,19 @@ def unburn(db, file_hash_val: str) -> str:
         return "The ashes have cooled beyond recovery."
     try:
         shutil.move(str(pyre_path), str(restore_path))
-        cur.execute("UPDATE file_memory SET burned_at=NULL WHERE file_hash=?", (file_hash_val,))
+        cur.execute(
+            "UPDATE file_memory SET burned_at=NULL WHERE file_hash=?", (file_hash_val,)
+        )
         cur.execute(
             "INSERT INTO interactions (module, user_input, grimalkin_response, sentiment) "
             "VALUES ('pyre', ?, ?, 'unburn')",
-            (filename, f"Pulled {filename} from the pyre.")
+            (filename, f"Pulled {filename} from the pyre."),
         )
         db.commit()
         log.info(f"Unburned: {filename} → {restore_path}")
-        return f"The ashes still smoldered. *{filename}* has been pulled from the flames."
+        return (
+            f"The ashes still smoldered. *{filename}* has been pulled from the flames."
+        )
     except Exception as e:
         log.error(f"Unburn failed for {filename}: {e}")
         return "Hrk. The pyre will not release its prey so easily."
@@ -1513,21 +1706,119 @@ def cleanup_old_ashes(db):
 
 # ─── The Web (Knowledge Graph) ────────────────────────────────────────────────
 
-STOPWORDS = frozenset({
-    "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
-    "of", "with", "by", "from", "up", "about", "into", "over", "after",
-    "what", "who", "how", "is", "are", "was", "were", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "could",
-    "should", "may", "might", "shall", "can", "not", "no", "nor", "so",
-    "than", "too", "very", "just", "only", "own", "same", "that", "this",
-    "these", "those", "then", "there", "here", "where", "when", "why",
-    "all", "each", "every", "both", "few", "more", "most", "other",
-    "some", "such", "any", "its", "my", "your", "his", "her", "our",
-    "their", "which", "whom", "whose", "if", "because", "as", "until",
-    "while", "also", "between", "through", "during", "before",
-    "connects", "connect", "link", "linked", "related", "thread",
-    "web", "ties", "find", "show", "tell", "know", "file", "files",
-})
+STOPWORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "but",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "of",
+        "with",
+        "by",
+        "from",
+        "up",
+        "about",
+        "into",
+        "over",
+        "after",
+        "what",
+        "who",
+        "how",
+        "is",
+        "are",
+        "was",
+        "were",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "shall",
+        "can",
+        "not",
+        "no",
+        "nor",
+        "so",
+        "than",
+        "too",
+        "very",
+        "just",
+        "only",
+        "own",
+        "same",
+        "that",
+        "this",
+        "these",
+        "those",
+        "then",
+        "there",
+        "here",
+        "where",
+        "when",
+        "why",
+        "all",
+        "each",
+        "every",
+        "both",
+        "few",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "any",
+        "its",
+        "my",
+        "your",
+        "his",
+        "her",
+        "our",
+        "their",
+        "which",
+        "whom",
+        "whose",
+        "if",
+        "because",
+        "as",
+        "until",
+        "while",
+        "also",
+        "between",
+        "through",
+        "during",
+        "before",
+        "connects",
+        "connect",
+        "link",
+        "linked",
+        "related",
+        "thread",
+        "web",
+        "ties",
+        "find",
+        "show",
+        "tell",
+        "know",
+        "file",
+        "files",
+    }
+)
 
 GROOM_COMBINED_SUFFIX = """
 Process these files and return **ONLY** valid JSON. No explanations, no markdown.
@@ -1564,11 +1855,14 @@ def ingest_entities(db, filename: str, entities: list):
         name = e.get("name", "").strip()
         if not name:
             continue
-        cur.execute("""
+        cur.execute(
+            """
             INSERT INTO entities (name, type, first_seen)
             VALUES (?, ?, date('now'))
             ON CONFLICT(name) DO UPDATE SET times_seen = times_seen + 1
-        """, (name, e.get("type", "topic")))
+        """,
+            (name, e.get("type", "topic")),
+        )
     db.commit()
 
 
@@ -1585,47 +1879,66 @@ def ingest_relationships(db, filename: str, relations: list):
         tgt = cur.fetchone()
         if not src or not tgt:
             continue
-        cur.execute("""
+        cur.execute(
+            """
             INSERT OR IGNORE INTO relationships
             (source_id, target_id, relation_type, source_file, seen)
             VALUES (?, ?, ?, ?, date('now'))
-        """, (src[0], tgt[0], r.get("type", "mentioned_with"), filename))
+        """,
+            (src[0], tgt[0], r.get("type", "mentioned_with"), filename),
+        )
     db.commit()
 
 
 def graph_query(db, query: str) -> str:
-    words = [w for w in re.findall(r'\b\w+\b', query) if len(w) >= 3 and w.lower() not in STOPWORDS]
+    words = [
+        w
+        for w in re.findall(r"\b\w+\b", query)
+        if len(w) >= 3 and w.lower() not in STOPWORDS
+    ]
     if not words:
         return ""
     cur = db.cursor()
     summaries = []
     seen_edges = set()
     for w in set(words):
-        cur.execute("SELECT id, name, type FROM entities WHERE name LIKE ? LIMIT 5", (f"%{w}%",))
+        cur.execute(
+            "SELECT id, name, type FROM entities WHERE name LIKE ? LIMIT 5", (f"%{w}%",)
+        )
         for eid, name, etype in cur.fetchall():
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT r.relation_type, e2.name, r.source_file
                 FROM relationships r
                 JOIN entities e2 ON r.target_id = e2.id
                 WHERE r.source_id = ?
                 ORDER BY r.seen DESC LIMIT 3
-            """, (eid,))
+            """,
+                (eid,),
+            )
             for rel, tgt, srcf in cur.fetchall():
                 edge_key = (name, rel, tgt)
                 if edge_key not in seen_edges:
-                    summaries.append(f"• {name} ({etype}) → {rel} → {tgt} [from {srcf}]")
+                    summaries.append(
+                        f"• {name} ({etype}) → {rel} → {tgt} [from {srcf}]"
+                    )
                     seen_edges.add(edge_key)
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT r.relation_type, e2.name, r.source_file
                 FROM relationships r
                 JOIN entities e2 ON r.source_id = e2.id
                 WHERE r.target_id = ?
                 ORDER BY r.seen DESC LIMIT 3
-            """, (eid,))
+            """,
+                (eid,),
+            )
             for rel, src, srcf in cur.fetchall():
                 edge_key = (src, rel, name)
                 if edge_key not in seen_edges:
-                    summaries.append(f"• {src} → {rel} → {name} ({etype}) [from {srcf}]")
+                    summaries.append(
+                        f"• {src} → {rel} → {name} ({etype}) [from {srcf}]"
+                    )
                     seen_edges.add(edge_key)
     return "\n".join(summaries[:8]) or ""
 
@@ -1639,8 +1952,10 @@ def graph_stats(db) -> dict:
 
 # ─── The Loom — Living Graph Visualization ────────────────────────────────────
 
-def hierarchical_layout(nodes: list[str], edges: list[tuple],
-                        max_nodes: int = 200) -> dict:
+
+def hierarchical_layout(
+    nodes: list[str], edges: list[tuple], max_nodes: int = 200
+) -> dict:
     """ELK-style layered layout: assign layers by graph distance from roots,
     then spread nodes within each layer to minimize edge crossings.
 
@@ -1701,10 +2016,19 @@ def hierarchical_layout(nodes: list[str], edges: list[tuple],
             prev_layer = layers.get(layer_idx - 1, [])
             for i, pn in enumerate(prev_layer):
                 prev_positions[pn] = i
+
             def sort_key(name):
-                connected_positions = [prev_positions[src] for src, tgt in edges
-                                       if tgt == name and src in prev_positions]
-                return (sum(connected_positions) / len(connected_positions)) if connected_positions else 0
+                connected_positions = [
+                    prev_positions[src]
+                    for src, tgt in edges
+                    if tgt == name and src in prev_positions
+                ]
+                return (
+                    (sum(connected_positions) / len(connected_positions))
+                    if connected_positions
+                    else 0
+                )
+
             layer_nodes.sort(key=sort_key)
         layers[layer_idx] = layer_nodes
 
@@ -1723,8 +2047,13 @@ def hierarchical_layout(nodes: list[str], edges: list[tuple],
     return pos
 
 
-def spring_layout(nodes: list[str], edges: list[tuple], iterations: int = 80,
-                  max_nodes: int = 200, timeout_sec: float = 2.0) -> dict:
+def spring_layout(
+    nodes: list[str],
+    edges: list[tuple],
+    iterations: int = 80,
+    max_nodes: int = 200,
+    timeout_sec: float = 2.0,
+) -> dict:
     """Force-directed layout, seeded from hierarchical positions for structure."""
     n = len(nodes)
     if n == 0:
@@ -1755,7 +2084,7 @@ def spring_layout(nodes: list[str], edges: list[tuple], iterations: int = 80,
             for j in range(i + 1, n):
                 delta = pos[i] - pos[j]
                 dist = max(np.linalg.norm(delta), 0.01)
-                f = (k ** 2 / dist) * (delta / dist)
+                f = (k**2 / dist) * (delta / dist)
                 force[i] += f
                 force[j] -= f
         # Attraction (edges only)
@@ -1794,15 +2123,21 @@ def build_loom_data(db, filter_type: str = None, search_term: str = "") -> dict:
         where.append("name LIKE ?")
         params.append(f"%{search_term}%")
     where_clause = " WHERE " + " AND ".join(where) if where else ""
-    cur.execute(f"SELECT name, type, times_seen, importance FROM entities{where_clause} ORDER BY times_seen DESC LIMIT 200")
+    cur.execute(
+        f"SELECT name, type, times_seen, importance FROM entities{where_clause} ORDER BY times_seen DESC LIMIT 200"
+    )
     nodes_raw = cur.fetchall()
-    nodes = [{"id": n[0], "type": n[1], "size": min(40, max(8, n[2] * 1.5)), "imp": n[3]} for n in nodes_raw]
+    nodes = [
+        {"id": n[0], "type": n[1], "size": min(40, max(8, n[2] * 1.5)), "imp": n[3]}
+        for n in nodes_raw
+    ]
     node_names = [n["id"] for n in nodes]
 
     if not node_names:
         return {"nodes": nodes, "edges": [], "stats": {"nodes": 0, "edges": 0}}
 
-    cur.execute("""
+    cur.execute(
+        """
         SELECT e1.name, e2.name, r.relation_type, COUNT(*) as strength
         FROM relationships r
         JOIN entities e1 ON r.source_id = e1.id
@@ -1810,10 +2145,15 @@ def build_loom_data(db, filter_type: str = None, search_term: str = "") -> dict:
         WHERE e1.name IN ({}) AND e2.name IN ({})
         GROUP BY e1.name, e2.name, r.relation_type
     """.format(",".join(["?"] * len(node_names)), ",".join(["?"] * len(node_names))),
-        node_names + node_names)
+        node_names + node_names,
+    )
     edges = [(row[0], row[1], row[2]) for row in cur.fetchall()]
 
-    return {"nodes": nodes, "edges": edges, "stats": {"nodes": len(nodes), "edges": len(edges)}}
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "stats": {"nodes": len(nodes), "edges": len(edges)},
+    }
 
 
 def build_loom_figure(db, filter_type: str = None, search_term: str = ""):
@@ -1821,7 +2161,11 @@ def build_loom_figure(db, filter_type: str = None, search_term: str = ""):
     if not data["nodes"]:
         if HAS_PLOTLY:
             fig = go.Figure()
-            fig.add_annotation(text="The Loom is bare.<br>Bring me files and I shall spin.", showarrow=False, font=dict(size=18))
+            fig.add_annotation(
+                text="The Loom is bare.<br>Bring me files and I shall spin.",
+                showarrow=False,
+                font=dict(size=18),
+            )
             fig.update_layout(template="plotly_dark", height=600)
             return fig
         return "<div style='padding:40px;text-align:center;font-size:1.3em;color:#666'>The Loom is bare. Bring me files and I shall spin.</div>"
@@ -1845,34 +2189,49 @@ def build_loom_figure(db, filter_type: str = None, search_term: str = ""):
         visible_nodes = [n for n in nodes if n["id"] in pos]
         node_size = [n["size"] for n in visible_nodes]
         color_map = {
-            "person": "#00ffcc", "org": "#ff6b6b", "date": "#ffd93d",
-            "location": "#6bcbff", "amount": "#ff9ff3", "topic": "#a29bfe",
+            "person": "#00ffcc",
+            "org": "#ff6b6b",
+            "date": "#ffd93d",
+            "location": "#6bcbff",
+            "amount": "#ff9ff3",
+            "topic": "#a29bfe",
         }
         node_color = [color_map.get(n["type"], "#667788") for n in visible_nodes]
 
         fig = go.Figure()
         # Edges — subtle, don't dominate
-        fig.add_trace(go.Scatter(
-            x=edge_x, y=edge_y, mode='lines',
-            line=dict(color='rgba(100,120,140,0.3)', width=1),
-            hoverinfo='none',
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=edge_x,
+                y=edge_y,
+                mode="lines",
+                line=dict(color="rgba(100,120,140,0.3)", width=1),
+                hoverinfo="none",
+            )
+        )
         # Nodes
-        fig.add_trace(go.Scatter(
-            x=node_x, y=node_y,
-            mode='markers+text',
-            marker=dict(
-                size=node_size, color=node_color,
-                line=dict(width=1.5, color='rgba(10,10,15,0.8)'),
-                opacity=0.9,
-            ),
-            text=[n["id"] for n in visible_nodes],
-            textposition="top center",
-            textfont=dict(size=9, color="#8899aa"),
-            hovertext=[f"<b>{n['id']}</b><br>{n['type']}<br>seen {int(n['size']//1.5)}×" for n in visible_nodes],
-            hoverinfo="text",
-            customdata=[n["id"] for n in visible_nodes],
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=node_x,
+                y=node_y,
+                mode="markers+text",
+                marker=dict(
+                    size=node_size,
+                    color=node_color,
+                    line=dict(width=1.5, color="rgba(10,10,15,0.8)"),
+                    opacity=0.9,
+                ),
+                text=[n["id"] for n in visible_nodes],
+                textposition="top center",
+                textfont=dict(size=9, color="#8899aa"),
+                hovertext=[
+                    f"<b>{n['id']}</b><br>{n['type']}<br>seen {int(n['size'] // 1.5)}×"
+                    for n in visible_nodes
+                ],
+                hoverinfo="text",
+                customdata=[n["id"] for n in visible_nodes],
+            )
+        )
         fig.update_layout(
             title=dict(text="The Loom", font=dict(size=14, color="#667788")),
             showlegend=False,
@@ -1881,20 +2240,29 @@ def build_loom_figure(db, filter_type: str = None, search_term: str = ""):
             font_color="#8899aa",
             height=650,
             margin=dict(l=30, r=30, t=45, b=30),
-            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False,
-                       range=[-0.05, 1.05]),
-            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False,
-                       range=[-0.05, 1.05], scaleanchor="x"),
+            xaxis=dict(
+                showgrid=False,
+                zeroline=False,
+                showticklabels=False,
+                range=[-0.05, 1.05],
+            ),
+            yaxis=dict(
+                showgrid=False,
+                zeroline=False,
+                showticklabels=False,
+                range=[-0.05, 1.05],
+                scaleanchor="x",
+            ),
         )
         return fig
 
     # HTML fallback
     html = "<div style='padding:20px;font-family:monospace'><h3>The Loom (static view)</h3><ul>"
     for n in nodes[:30]:
-        html += f"<li><b>{n['id']}</b> ({n['type']}) — {n['size']//1.5}×</li>"
+        html += f"<li><b>{n['id']}</b> ({n['type']}) — {n['size'] // 1.5}×</li>"
     html += "</ul>"
     if len(nodes) > 30:
-        html += f"<p>…and {len(nodes)-30} more threads.</p>"
+        html += f"<p>…and {len(nodes) - 30} more threads.</p>"
     html += "</div>"
     return html
 
@@ -1906,7 +2274,8 @@ def describe_node(db, entity_name: str) -> str:
     if not row:
         return "I do not know this name yet."
     etype, times = row
-    cur.execute("""
+    cur.execute(
+        """
         SELECT r.relation_type, e2.name, r.source_file
         FROM relationships r JOIN entities e2 ON r.target_id = e2.id
         WHERE r.source_id = (SELECT id FROM entities WHERE name=?)
@@ -1915,12 +2284,16 @@ def describe_node(db, entity_name: str) -> str:
         FROM relationships r JOIN entities e1 ON r.source_id = e1.id
         WHERE r.target_id = (SELECT id FROM entities WHERE name=?)
         LIMIT 12
-    """, (entity_name, entity_name))
+    """,
+        (entity_name, entity_name),
+    )
     threads = cur.fetchall()
     if not threads:
         return f"* {entity_name} ({etype}) stands alone so far. {times} sightings."
     thread_count = len(threads[:6])
-    lines = [f"{thread_count} thread{'s' if thread_count != 1 else ''} radiate from *{entity_name}* ({etype})."]
+    lines = [
+        f"{thread_count} thread{'s' if thread_count != 1 else ''} radiate from *{entity_name}* ({etype})."
+    ]
     for rel, tgt, srcf in threads[:6]:
         lines.append(f"• {rel} → {tgt} [from {srcf}]")
     lines.append("The densest knot binds it to your most important prey.")
@@ -1929,14 +2302,17 @@ def describe_node(db, entity_name: str) -> str:
 
 def find_clusters(db, top_n: int = 5) -> str:
     cur = db.cursor()
-    cur.execute("""
+    cur.execute(
+        """
         SELECT e1.name, e2.name, COUNT(*) as strength
         FROM relationships r
         JOIN entities e1 ON r.source_id = e1.id
         JOIN entities e2 ON r.target_id = e2.id
         GROUP BY e1.name, e2.name
         ORDER BY strength DESC LIMIT ?
-    """, (top_n * 3,))
+    """,
+        (top_n * 3,),
+    )
     clusters = cur.fetchall()
     if not clusters:
         return "No knots yet. The web is young."
@@ -1952,12 +2328,14 @@ def export_loom_markdown(db) -> Path:
     cur = db.cursor()
     cur.execute("SELECT name, type, times_seen FROM entities ORDER BY times_seen DESC")
     entities = cur.fetchall()
-    cur.execute("SELECT e1.name, r.relation_type, e2.name FROM relationships r JOIN entities e1 ON r.source_id=e1.id JOIN entities e2 ON r.target_id=e2.id")
+    cur.execute(
+        "SELECT e1.name, r.relation_type, e2.name FROM relationships r JOIN entities e1 ON r.source_id=e1.id JOIN entities e2 ON r.target_id=e2.id"
+    )
     rels = cur.fetchall()
 
     md = ["# Grimalkin Loom Export — " + today, ""]
     md.append("## Entities")
-    for t in ["person","org","date","location","amount","topic"]:
+    for t in ["person", "org", "date", "location", "amount", "topic"]:
         md.append(f"### {t.upper()}")
         for name, etype, cnt in [e for e in entities if e[1] == t]:
             md.append(f"- **{name}** ({cnt}×)")
@@ -1971,6 +2349,7 @@ def export_loom_markdown(db) -> Path:
 
 # ─── The Mirror ───────────────────────────────────────────────────────────────
 
+
 def generate_weekly_reflection(db, force: bool = False) -> str:
     today = date.today()
     cur = db.cursor()
@@ -1982,28 +2361,37 @@ def generate_weekly_reflection(db, force: bool = False) -> str:
 
     cur.execute("SELECT COUNT(*) FROM file_memory WHERE burned_at IS NULL")
     total = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(DISTINCT date(created_at)) FROM file_memory WHERE created_at >= date('now','-7 days')")
+    cur.execute(
+        "SELECT COUNT(DISTINCT date(created_at)) FROM file_memory WHERE created_at >= date('now','-7 days')"
+    )
     active_days = cur.fetchone()[0] or 1
     stats = graph_stats(db)
-    top_entities = cur.execute("SELECT name FROM entities ORDER BY times_seen DESC LIMIT 3").fetchall()
+    top_entities = cur.execute(
+        "SELECT name FROM entities ORDER BY times_seen DESC LIMIT 3"
+    ).fetchall()
     top_names = ", ".join([n[0] for n in top_entities])
 
     prompt = f"""Seven days have passed in the vault.
 Total prey: {total}
 Active days: {active_days}
-Web: {stats['entities']} names, {stats['relationships']} threads
+Web: {stats["entities"]} names, {stats["relationships"]} threads
 Top entities: {top_names}
 
-Write a 2-3 sentence reflection in {get_setting(db, 'pet_name', 'Grimalkin')}'s sardonic cat voice. End with a personal note on our bond."""
+Write a 2-3 sentence reflection in {get_setting(db, "pet_name", "Grimalkin")}'s sardonic cat voice. End with a personal note on our bond."""
 
-    result = ollama_chat(prompt, system=build_persona(get_setting(db, "pet_name", "Grimalkin"), db=db))
+    result = ollama_chat(
+        prompt, system=build_persona(get_setting(db, "pet_name", "Grimalkin"), db=db)
+    )
     summary = scrub_corporate(result.text)
 
     key_entities = json.dumps([n[0] for n in top_entities])
-    cur.execute("""
+    cur.execute(
+        """
         INSERT OR REPLACE INTO reflections (reflection_date, summary, key_entities)
         VALUES (?, ?, ?)
-    """, (today.isoformat(), summary, key_entities))
+    """,
+        (today.isoformat(), summary, key_entities),
+    )
     db.commit()
     log.info("Weekly reflection woven.")
     return summary
@@ -2012,7 +2400,9 @@ Write a 2-3 sentence reflection in {get_setting(db, 'pet_name', 'Grimalkin')}'s 
 def get_latest_reflection(db) -> str:
     """Return the most recent Mirror entry, formatted for display."""
     cur = db.cursor()
-    cur.execute("SELECT reflection_date, summary FROM reflections ORDER BY reflection_date DESC LIMIT 1")
+    cur.execute(
+        "SELECT reflection_date, summary FROM reflections ORDER BY reflection_date DESC LIMIT 1"
+    )
     row = cur.fetchone()
     if not row:
         return "The mirror has not yet spoken. Run a groom cycle first."
@@ -2036,9 +2426,16 @@ def merge_entity(db, name_keep: str, name_delete: str) -> str:
         keeper_id, delete_id = delete_id, keeper_id
         name_keep, name_delete = name_delete, name_keep
 
-    cur.execute("UPDATE relationships SET source_id=? WHERE source_id=?", (keeper_id, delete_id))
-    cur.execute("UPDATE relationships SET target_id=? WHERE target_id=?", (keeper_id, delete_id))
-    cur.execute("UPDATE entities SET times_seen = times_seen + ? WHERE id=?", (delete_ts, keeper_id))
+    cur.execute(
+        "UPDATE relationships SET source_id=? WHERE source_id=?", (keeper_id, delete_id)
+    )
+    cur.execute(
+        "UPDATE relationships SET target_id=? WHERE target_id=?", (keeper_id, delete_id)
+    )
+    cur.execute(
+        "UPDATE entities SET times_seen = times_seen + ? WHERE id=?",
+        (delete_ts, keeper_id),
+    )
     cur.execute("DELETE FROM entities WHERE id=?", (delete_id,))
     cur.execute("""
         DELETE FROM relationships WHERE rowid NOT IN (
@@ -2053,11 +2450,16 @@ def merge_entity(db, name_keep: str, name_delete: str) -> str:
 
 def set_entity_importance(db, entity_name: str, important: bool) -> str:
     cur = db.cursor()
-    cur.execute("UPDATE entities SET importance=? WHERE name=?", (1 if important else 0, entity_name))
+    cur.execute(
+        "UPDATE entities SET importance=? WHERE name=?",
+        (1 if important else 0, entity_name),
+    )
     if cur.rowcount == 0:
         return "I do not know this name."
     db.commit()
-    return f"I shall watch *{entity_name}* {'closely' if important else 'less intently'}."
+    return (
+        f"I shall watch *{entity_name}* {'closely' if important else 'less intently'}."
+    )
 
 
 def forget_entity(db, entity_name: str) -> str:
@@ -2067,7 +2469,9 @@ def forget_entity(db, entity_name: str) -> str:
     if not row:
         return "That name was never here."
     eid = row[0]
-    cur.execute("DELETE FROM relationships WHERE source_id=? OR target_id=?", (eid, eid))
+    cur.execute(
+        "DELETE FROM relationships WHERE source_id=? OR target_id=?", (eid, eid)
+    )
     cur.execute("DELETE FROM entities WHERE id=?", (eid,))
     db.commit()
     return f"The name dissolves. The threads fall away. *{entity_name}* was never here."
@@ -2075,7 +2479,10 @@ def forget_entity(db, entity_name: str) -> str:
 
 def list_top_entities(db, limit: int = 20) -> str:
     cur = db.cursor()
-    cur.execute("SELECT name, type, times_seen, importance FROM entities ORDER BY times_seen DESC LIMIT ?", (limit,))
+    cur.execute(
+        "SELECT name, type, times_seen, importance FROM entities ORDER BY times_seen DESC LIMIT ?",
+        (limit,),
+    )
     rows = cur.fetchall()
     lines = ["Top threads in my web:"]
     for name, etype, ts, imp in rows:
@@ -2088,18 +2495,25 @@ def proactive_whispers(db, bond_level: int) -> list[str]:
     if bond_level < 60:
         return []
     cur = db.cursor()
-    cur.execute("SELECT name, times_seen FROM entities WHERE times_seen >= 3 ORDER BY times_seen DESC LIMIT 1")
+    cur.execute(
+        "SELECT name, times_seen FROM entities WHERE times_seen >= 3 ORDER BY times_seen DESC LIMIT 1"
+    )
     row = cur.fetchone()
     if not row:
         return []
-    return [f"I notice *{row[0]}* has appeared {row[1]} times across my web. Coincidence?"]
+    return [
+        f"I notice *{row[0]}* has appeared {row[1]} times across my web. Coincidence?"
+    ]
 
 
 def recall(db, index, metadata, term: str) -> str:
     g = graph_query(db, term)
     kw = keyword_search(db, term)
     cur = db.cursor()
-    cur.execute("SELECT summary FROM reflections WHERE key_entities LIKE ? ORDER BY reflection_date DESC LIMIT 3", (f"%{term}%",))
+    cur.execute(
+        "SELECT summary FROM reflections WHERE key_entities LIKE ? ORDER BY reflection_date DESC LIMIT 3",
+        (f"%{term}%",),
+    )
     refs = [row[0] for row in cur.fetchall()]
     # Pull relevant chat history
     cur.execute(
@@ -2107,13 +2521,19 @@ def recall(db, index, metadata, term: str) -> str:
         (f"%{term}%",),
     )
     chat_refs = [f"{r[0]}: {r[1][:100]}" for r in cur.fetchall()]
-    context = f"Graph threads:\n{g}\n\nFiles with keyword: {', '.join(list(kw)[:5])}\n\nPast reflections mentioning it:\n" + "\n".join(refs[:2])
+    context = (
+        f"Graph threads:\n{g}\n\nFiles with keyword: {', '.join(list(kw)[:5])}\n\nPast reflections mentioning it:\n"
+        + "\n".join(refs[:2])
+    )
     if chat_refs:
-        context += f"\n\nPast conversations mentioning it:\n" + "\n".join(chat_refs)
-    return grimalkin_respond(f"Tell me everything about {term}.", context=context, db=db)
+        context += "\n\nPast conversations mentioning it:\n" + "\n".join(chat_refs)
+    return grimalkin_respond(
+        f"Tell me everything about {term}.", context=context, db=db
+    )
 
 
 # ─── Nightly Groom v4 ─────────────────────────────────────────────────────────
+
 
 def build_groom_prompt(files: list[dict]) -> str:
     parts = ["Analyze these files from the vault:\n"]
@@ -2127,13 +2547,16 @@ def build_groom_prompt(files: list[dict]) -> str:
 
 def get_ungroomed_files(db, limit=10) -> list[dict]:
     cur = db.cursor()
-    cur.execute("""
+    cur.execute(
+        """
         SELECT filename, sorted_path, category, file_hash
         FROM file_memory
         WHERE indexed = 1 AND burned_at IS NULL
         AND (tags = '[]' OR tags IS NULL OR tags = '')
         LIMIT ?
-    """, (limit,))
+    """,
+        (limit,),
+    )
     cols = [c[0] for c in cur.description]
     files = [dict(zip(cols, row)) for row in cur.fetchall()]
     for f in files:
@@ -2160,8 +2583,10 @@ def nightly_groom_v4(db, index, metadata):
             fh = file_map[fn]["file_hash"]
             tags_json = json.dumps(p.get("tags", []))
             note = p.get("note", "")
-            db.execute("UPDATE file_memory SET tags=?, notes=? WHERE file_hash=?",
-                       (tags_json, note, fh))
+            db.execute(
+                "UPDATE file_memory SET tags=?, notes=? WHERE file_hash=?",
+                (tags_json, note, fh),
+            )
             ingest_entities(db, fn, p.get("entities", []))
             ingest_relationships(db, fn, p.get("relations", []))
 
@@ -2174,7 +2599,10 @@ def nightly_groom_v4(db, index, metadata):
         new_index, new_metadata = compact_faiss(db, index, metadata)
         index.reset()
         if new_index.ntotal > 0:
-            vectors = np.array([new_index.reconstruct(i) for i in range(new_index.ntotal)], dtype=np.float32)
+            vectors = np.array(
+                [new_index.reconstruct(i) for i in range(new_index.ntotal)],
+                dtype=np.float32,
+            )
             index.add(vectors)
         metadata.clear()
         metadata.extend(new_metadata)
@@ -2187,8 +2615,11 @@ def nightly_groom_v4(db, index, metadata):
 
 # ─── Proactive Detection & Auto-Categories ───────────────────────────────────
 
+
 def add_notification(db, ntype: str, detail: str):
-    db.execute("INSERT INTO notifications (type, detail) VALUES (?, ?)", (ntype, detail))
+    db.execute(
+        "INSERT INTO notifications (type, detail) VALUES (?, ?)", (ntype, detail)
+    )
     db.commit()
 
 
@@ -2201,7 +2632,10 @@ def get_pending_notifications(db, limit: int = 5) -> list[dict]:
     rows = [{"id": r[0], "type": r[1], "detail": r[2]} for r in cur.fetchall()]
     if rows:
         ids = [r["id"] for r in rows]
-        db.execute(f"UPDATE notifications SET seen=1 WHERE id IN ({','.join('?' * len(ids))})", ids)
+        db.execute(
+            f"UPDATE notifications SET seen=1 WHERE id IN ({','.join('?' * len(ids))})",
+            ids,
+        )
         db.commit()
     return rows
 
@@ -2228,8 +2662,11 @@ def check_hunting_grounds(db):
         names_preview = ", ".join(new_names[:3])
         if new_count > 3:
             names_preview += f" and {new_count - 3} more"
-        add_notification(db, "new_prey",
-                         f"{new_count} new file{'s' if new_count != 1 else ''} in the hunting grounds: {names_preview}")
+        add_notification(
+            db,
+            "new_prey",
+            f"{new_count} new file{'s' if new_count != 1 else ''} in the hunting grounds: {names_preview}",
+        )
         log.info(f"Proactive scan: {new_count} new files detected.")
 
 
@@ -2261,10 +2698,13 @@ def suggest_categories(db):
             )
             if cur.fetchone()[0] == 0:
                 add_notification(
-                    db, "category_suggestion",
+                    db,
+                    "category_suggestion",
                     f"Tag '{tag}' appears {count} times in {cat}. Consider: categories (to add '{tag.upper()}' as a territory)",
                 )
-                log.info(f"Category suggestion: '{tag}' frequent in {cat} ({count} files)")
+                log.info(
+                    f"Category suggestion: '{tag}' frequent in {cat} ({count} files)"
+                )
 
 
 def format_notifications(notifications: list[dict]) -> str:
@@ -2284,6 +2724,7 @@ def format_notifications(notifications: list[dict]) -> str:
 
 # ─── Whispers ──────────────────────────────────────────────────────────────────
 
+
 def generate_whispers(db) -> str:
     bond = get_bond_level(db)
     address = get_setting(db, "user_address", "mortal")
@@ -2292,32 +2733,50 @@ def generate_whispers(db) -> str:
     cur = db.cursor()
     cur.execute("SELECT COUNT(*) FROM file_memory WHERE burned_at IS NULL")
     total_files = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM file_memory WHERE indexed=1 AND burned_at IS NULL")
+    cur.execute(
+        "SELECT COUNT(*) FROM file_memory WHERE indexed=1 AND burned_at IS NULL"
+    )
     indexed_files = cur.fetchone()[0]
-    cur.execute("SELECT category, COUNT(*) FROM file_memory WHERE burned_at IS NULL GROUP BY category")
+    cur.execute(
+        "SELECT category, COUNT(*) FROM file_memory WHERE burned_at IS NULL GROUP BY category"
+    )
     cat_counts = {row[0]: row[1] for row in cur.fetchall()}
-    cur.execute("SELECT COUNT(*) FROM file_memory WHERE date(created_at)=date('now') AND burned_at IS NULL")
+    cur.execute(
+        "SELECT COUNT(*) FROM file_memory WHERE date(created_at)=date('now') AND burned_at IS NULL"
+    )
     today_count = cur.fetchone()[0]
 
     whispers = []
-    whispers.append(f"Good {'morning' if datetime.now().hour < 12 else 'evening'}, {address}.")
-    whispers.append(f"The vault holds {total_files} files — {indexed_files} indexed and searchable.")
+    whispers.append(
+        f"Good {'morning' if datetime.now().hour < 12 else 'evening'}, {address}."
+    )
+    whispers.append(
+        f"The vault holds {total_files} files — {indexed_files} indexed and searchable."
+    )
 
     if today_count > 0:
-        whispers.append(f"I sorted {today_count} new {'prey' if today_count > 1 else 'item'} today.")
+        whispers.append(
+            f"I sorted {today_count} new {'prey' if today_count > 1 else 'item'} today."
+        )
 
     if cat_counts:
         top_cat = max(cat_counts, key=cat_counts.get)
-        whispers.append(f"Your {top_cat.lower()} territory is the most populated with {cat_counts[top_cat]} files.")
+        whispers.append(
+            f"Your {top_cat.lower()} territory is the most populated with {cat_counts[top_cat]} files."
+        )
 
     burn_count = int(get_setting(db, "burn_count", "0"))
     if burn_count > 0:
-        whispers.append(f"{burn_count} offering{'s' if burn_count != 1 else ''} to the pyre and counting.")
+        whispers.append(
+            f"{burn_count} offering{'s' if burn_count != 1 else ''} to the pyre and counting."
+        )
 
     if BOND.allows(db, "graph_in_whispers"):
         stats = graph_stats(db)
         if stats["relationships"] > 0:
-            whispers.append(f"My web holds {stats['relationships']} threads across {stats['entities']} names.")
+            whispers.append(
+                f"My web holds {stats['relationships']} threads across {stats['entities']} names."
+            )
 
     if BOND.allows(db, "proactive_whispers"):
         for insight in proactive_whispers(db, bond):
@@ -2327,13 +2786,16 @@ def generate_whispers(db) -> str:
 
     today = datetime.now().strftime("%Y-%m-%d")
     content = " ".join(whispers)
-    db.execute("INSERT OR REPLACE INTO briefing_log (date, content, files_processed) VALUES (?, ?, ?)",
-               (today, content, today_count))
+    db.execute(
+        "INSERT OR REPLACE INTO briefing_log (date, content, files_processed) VALUES (?, ?, ?)",
+        (today, content, today_count),
+    )
     db.commit()
     return content
 
 
 # ─── Reindex / Ingest ─────────────────────────────────────────────────────────
+
 
 def reindex_unindexed(db, index, metadata) -> str:
     cur = db.cursor()
@@ -2364,7 +2826,9 @@ def reindex_unindexed(db, index, metadata) -> str:
         save_faiss(index, metadata)
         db.commit()
 
-    lines = [f"Indexed {indexed_count} file{'s' if indexed_count != 1 else ''} into the web."]
+    lines = [
+        f"Indexed {indexed_count} file{'s' if indexed_count != 1 else ''} into the web."
+    ]
     if failed:
         lines.append(f"{len(failed)} resisted: {', '.join(failed)}")
     return " ".join(lines)
@@ -2398,11 +2862,14 @@ def ingest_sorted(db, index, metadata) -> str:
             added = index_chunks(index, metadata, chunks)
             indexed = 1 if added > 0 else 0
 
-            db.execute("""
+            db.execute(
+                """
                 INSERT OR IGNORE INTO file_memory
                 (filename, original_path, sorted_path, category, file_hash, indexed)
                 VALUES (?, ?, ?, ?, ?, ?)
-            """, (fpath.name, str(fpath), str(fpath), category, fh, indexed))
+            """,
+                (fpath.name, str(fpath), str(fpath), category, fh, indexed),
+            )
 
             if indexed:
                 indexed_count += 1
@@ -2418,7 +2885,9 @@ def ingest_sorted(db, index, metadata) -> str:
     if discovered == 0:
         return "I have walked every corridor of sorted/. No orphans found."
 
-    lines = [f"Discovered {discovered} orphan{'s' if discovered != 1 else ''}. Indexed {indexed_count}."]
+    lines = [
+        f"Discovered {discovered} orphan{'s' if discovered != 1 else ''}. Indexed {indexed_count}."
+    ]
     if failed:
         lines.append(f"{len(failed)} could not be chunked.")
     return " ".join(lines)
@@ -2444,8 +2913,9 @@ SCRATCH_COMMANDS = {
 }
 
 
-def handle_scratch_post(db, index, metadata, user_input: str,
-                        session_id: str = "") -> str:
+def handle_scratch_post(
+    db, index, metadata, user_input: str, session_id: str = ""
+) -> str:
     text = user_input.strip()
     lower = text.lower()
     bond = get_bond_level(db)
@@ -2453,7 +2923,9 @@ def handle_scratch_post(db, index, metadata, user_input: str,
 
     # Fire transition message if the bond just crossed a tier boundary
     if transition:
-        tier_msg = BOND.TRANSITION_MESSAGES.get((transition.old_tier, transition.new_tier), "")
+        tier_msg = BOND.TRANSITION_MESSAGES.get(
+            (transition.old_tier, transition.new_tier), ""
+        )
         if tier_msg:
             log.info(f"Bond transition: {transition.old_tier} → {transition.new_tier}")
 
@@ -2461,7 +2933,7 @@ def handle_scratch_post(db, index, metadata, user_input: str,
         lines = ["Available commands:"]
         for cmd, desc in SCRATCH_COMMANDS.items():
             lines.append(f"  **{cmd}** — {desc}")
-        lines.append("  **merge \"A\" \"B\"** — canonicalize")
+        lines.append('  **merge "A" "B"** — canonicalize')
         lines.append("  **important Name** / **forget Name**")
         lines.append("  **recall Name**")
         return "\n".join(lines)
@@ -2472,7 +2944,9 @@ def handle_scratch_post(db, index, metadata, user_input: str,
             return "The hunting grounds are quiet."
         lines = [f"Caught {len(results)} new file{'s' if len(results) != 1 else ''}:"]
         for r in results:
-            lines.append(f"  • {r['filename']} → {r['category']} ({r['chunks']} chunks)")
+            lines.append(
+                f"  • {r['filename']} → {r['category']} ({r['chunks']} chunks)"
+            )
         return "\n".join(lines)
 
     if lower == "whispers":
@@ -2547,14 +3021,19 @@ def handle_scratch_post(db, index, metadata, user_input: str,
         summary, history = build_chat_messages(db, session_id)
         return grimalkin_respond(
             f"Your master has renamed you from {old_name} to {new_name}. Acknowledge your new name and react in character.",
-            db=db, chat_history=history, chat_summary=summary,
+            db=db,
+            chat_history=history,
+            chat_summary=summary,
         )
 
     summary, history = build_chat_messages(db, session_id)
-    resp = grimalkin_respond(user_input, db=db,
-                             chat_history=history, chat_summary=summary)
+    resp = grimalkin_respond(
+        user_input, db=db, chat_history=history, chat_summary=summary
+    )
     if transition:
-        tier_msg = BOND.TRANSITION_MESSAGES.get((transition.old_tier, transition.new_tier), "")
+        tier_msg = BOND.TRANSITION_MESSAGES.get(
+            (transition.old_tier, transition.new_tier), ""
+        )
         if tier_msg:
             resp = f"{tier_msg}\n\n---\n\n{resp}"
     return resp
@@ -2564,7 +3043,9 @@ def _vault_stats(db) -> str:
     cur = db.cursor()
     cur.execute("SELECT COUNT(*) FROM file_memory WHERE burned_at IS NULL")
     total = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM file_memory WHERE indexed=1 AND burned_at IS NULL")
+    cur.execute(
+        "SELECT COUNT(*) FROM file_memory WHERE indexed=1 AND burned_at IS NULL"
+    )
     indexed = cur.fetchone()[0]
     stats = graph_stats(db)
     burn_count = int(get_setting(db, "burn_count", "0"))
@@ -2576,6 +3057,7 @@ def _vault_stats(db) -> str:
 
 
 # ─── Easter Eggs ───────────────────────────────────────────────────────────────
+
 
 def check_easter_eggs(user_input: str, db=None) -> str:
     text = user_input.strip().lower()
@@ -2992,6 +3474,7 @@ textarea:focus, input[type="text"]:focus {
 
 # ─── UI Handlers ──────────────────────────────────────────────────────────────
 
+
 def _handle_file_drop(db, index, metadata, filepath: Path) -> str:
     """Sort, index, and analyze a dropped file."""
     result = sort_file(db, index, metadata, filepath)
@@ -3002,7 +3485,9 @@ def _handle_file_drop(db, index, metadata, filepath: Path) -> str:
     summary = f"*ears perk* New prey caught: **{result['filename']}** → {cat} ({chunks} chunks indexed)."
     if chunks > 0:
         # Query the file's own content for a quick analysis
-        analysis = hybrid_vault_rag(db, index, metadata, f"summarize {result['filename']}")
+        analysis = hybrid_vault_rag(
+            db, index, metadata, f"summarize {result['filename']}"
+        )
         summary += f"\n\n{analysis}"
     return summary
 
@@ -3027,14 +3512,24 @@ def ui_chat(db, index, metadata, session_id, message, history):
         if text:
             # User dropped files AND typed a message — process both
             resp = file_summary + "\n\n---\n\n"
-            resp += handle_scratch_post(db, index, metadata, text, session_id=session_id)
+            resp += handle_scratch_post(
+                db, index, metadata, text, session_id=session_id
+            )
         else:
             resp = file_summary
-        display_text = text if text else f"[dropped {len(files)} file{'s' if len(files) != 1 else ''}]"
+        display_text = (
+            text
+            if text
+            else f"[dropped {len(files)} file{'s' if len(files) != 1 else ''}]"
+        )
     else:
         display_text = text
         egg = check_easter_eggs(text, db=db)
-        resp = egg if egg else handle_scratch_post(db, index, metadata, text, session_id=session_id)
+        resp = (
+            egg
+            if egg
+            else handle_scratch_post(db, index, metadata, text, session_id=session_id)
+        )
 
     # Prepend any pending notifications
     pending = get_pending_notifications(db)
@@ -3068,7 +3563,11 @@ def ui_whispers(db):
 
 
 def ui_vault_query(db, index, metadata, q):
-    return hybrid_vault_rag(db, index, metadata, q) if q.strip() else "Speak to receive answers."
+    return (
+        hybrid_vault_rag(db, index, metadata, q)
+        if q.strip()
+        else "Speak to receive answers."
+    )
 
 
 def ui_pyre_row_select(evt: gr.SelectData, df_state):
@@ -3114,7 +3613,11 @@ def ui_loom_clusters(db):
 
 
 def ui_loom_search(db, search):
-    return describe_node(db, search) if search.strip() else "Search an entity to see its threads."
+    return (
+        describe_node(db, search)
+        if search.strip()
+        else "Search an entity to see its threads."
+    )
 
 
 def ui_loom_export(db):
@@ -3152,8 +3655,6 @@ def ui_status_pulse(db) -> str:
     cur = db.cursor()
     cur.execute("SELECT COUNT(*) FROM file_memory WHERE burned_at IS NULL")
     files = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM file_memory WHERE indexed=1 AND burned_at IS NULL")
-    indexed = cur.fetchone()[0]
     stats = graph_stats(db)
     bond = get_bond_level(db)
     burn_count = int(get_setting(db, "burn_count", "0"))
@@ -3165,7 +3666,7 @@ def ui_status_pulse(db) -> str:
     if burn_count:
         parts.append(f"{burn_count} burned")
     parts.append(f"bond {bond}")
-    return '<div class="status-pulse">' + ' · '.join(parts) + '</div>'
+    return '<div class="status-pulse">' + " · ".join(parts) + "</div>"
 
 
 def ui_save_settings(db, new_name, new_address):
@@ -3217,19 +3718,34 @@ def ui_save_avatar(filepath):
 
 # ─── Gradio Wiring ───────────────────────────────────────────────────────────
 
+
 def _build_dark_theme():
     return gr.themes.Base(
         primary_hue=gr.themes.Color(
-            c50="#e6fff7", c100="#b3ffe0", c200="#80ffc9",
-            c300="#4dffb3", c400="#1aff9c", c500="#00e6b0",
-            c600="#00b386", c700="#00805f", c800="#004d39",
-            c900="#001a13", c950="#000d09",
+            c50="#e6fff7",
+            c100="#b3ffe0",
+            c200="#80ffc9",
+            c300="#4dffb3",
+            c400="#1aff9c",
+            c500="#00e6b0",
+            c600="#00b386",
+            c700="#00805f",
+            c800="#004d39",
+            c900="#001a13",
+            c950="#000d09",
         ),
         neutral_hue=gr.themes.Color(
-            c50="#f0f2f5", c100="#d1d5db", c200="#9ca3af",
-            c300="#6b7280", c400="#4b5563", c500="#374151",
-            c600="#1f2937", c700="#151520", c800="#111118",
-            c900="#0d0d14", c950="#0a0a0f",
+            c50="#f0f2f5",
+            c100="#d1d5db",
+            c200="#9ca3af",
+            c300="#6b7280",
+            c400="#4b5563",
+            c500="#374151",
+            c600="#1f2937",
+            c700="#151520",
+            c800="#111118",
+            c900="#0d0d14",
+            c950="#0a0a0f",
         ),
         font=[gr.themes.GoogleFont("Inter"), "Segoe UI", "system-ui", "sans-serif"],
     ).set(
@@ -3260,9 +3776,11 @@ def _get_avatar_src() -> str:
 
 
 def build_ui(db, index, metadata):
-    with gr.Blocks(title=f"{get_setting(db, 'pet_name', 'Grimalkin')} — Your Private AI Familiar",
-                   theme=_build_dark_theme(), css=GRIM_CSS) as demo:
-
+    with gr.Blocks(
+        title=f"{get_setting(db, 'pet_name', 'Grimalkin')} — Your Private AI Familiar",
+        theme=_build_dark_theme(),
+        css=GRIM_CSS,
+    ) as demo:
         pet_name = get_setting(db, "pet_name", "Grimalkin")
         _tier = BOND.tier_for(get_bond_level(db))
         _tier_lines = OPENING_LINES.get(_tier, OPENING_LINES["Acquaintance"])
@@ -3307,16 +3825,24 @@ def build_ui(db, index, metadata):
                 file_types=None,  # accept all file types
                 submit_btn=True,
             )
-            msg_input.submit(partial(ui_chat, db, index, metadata), [session_id, msg_input, chatbot], [chatbot, msg_input])
+            msg_input.submit(
+                partial(ui_chat, db, index, metadata),
+                [session_id, msg_input, chatbot],
+                [chatbot, msg_input],
+            )
 
             with gr.Accordion("Commands", open=False):
-                cmd_lines = [f"**{cmd}** — {desc}" for cmd, desc in SCRATCH_COMMANDS.items()]
-                cmd_lines.extend([
-                    '**merge "A" "B"** — canonicalize entity names',
-                    "**important Name** — mark entity as important",
-                    "**forget Name** — remove entity from the web",
-                    "**recall Name** — deep recall on any topic",
-                ])
+                cmd_lines = [
+                    f"**{cmd}** — {desc}" for cmd, desc in SCRATCH_COMMANDS.items()
+                ]
+                cmd_lines.extend(
+                    [
+                        '**merge "A" "B"** — canonicalize entity names',
+                        "**important Name** — mark entity as important",
+                        "**forget Name** — remove entity from the web",
+                        "**recall Name** — deep recall on any topic",
+                    ]
+                )
                 gr.Markdown("\n\n".join(cmd_lines))
 
         # Hunt
@@ -3334,7 +3860,9 @@ def build_ui(db, index, metadata):
         # Vault
         with gr.Tab("📚 The Vault"):
             vault_output = gr.Markdown("Ask anything about your files.")
-            vault_input = gr.Textbox(label="Query the Vault", placeholder="What connects my tax files…?")
+            vault_input = gr.Textbox(
+                label="Query the Vault", placeholder="What connects my tax files…?"
+            )
             vault_btn = gr.Button("Search the Vault", variant="primary")
             _vault = partial(ui_vault_query, db, index, metadata)
             vault_btn.click(_vault, vault_input, vault_output)
@@ -3348,21 +3876,48 @@ def build_ui(db, index, metadata):
             bond_state = gr.State(get_bond_level(db))
 
             with gr.Row():
-                burnable_df = gr.DataFrame(value=initial_list, headers=["filename","category","tags","notes","file_hash"], label="Offerings", interactive=False)
+                burnable_df = gr.DataFrame(
+                    value=initial_list,
+                    headers=["filename", "category", "tags", "notes", "file_hash"],
+                    label="Offerings",
+                    interactive=False,
+                )
                 with gr.Column():
-                    ritual_html = gr.HTML("<div class='pyre-container'><div class='flames'>🔥</div></div>")
-                    confirm_box = gr.Textbox(label="Speak the true name", placeholder="report_q3.pdf")
-                    light_button = gr.Button("Light the Pyre", variant="stop", interactive=False)
+                    ritual_html = gr.HTML(
+                        "<div class='pyre-container'><div class='flames'>🔥</div></div>"
+                    )
+                    confirm_box = gr.Textbox(
+                        label="Speak the true name", placeholder="report_q3.pdf"
+                    )
+                    light_button = gr.Button(
+                        "Light the Pyre", variant="stop", interactive=False
+                    )
                     status_out = gr.Markdown()
 
-            burnable_df.select(ui_pyre_row_select, burn_df_state, [ritual_html, hidden_hash])
-            confirm_box.change(partial(ui_pyre_confirm, db), [confirm_box, hidden_hash, bond_state], light_button)
-            light_button.click(partial(ui_pyre_ignite, db), [hidden_hash, confirm_box, bond_state, burn_df_state], [status_out, burnable_df, burn_df_state])
-            gr.Button("Refresh Offerings").click(partial(ui_pyre_refresh, db), None, [burnable_df, burn_df_state])
+            burnable_df.select(
+                ui_pyre_row_select, burn_df_state, [ritual_html, hidden_hash]
+            )
+            confirm_box.change(
+                partial(ui_pyre_confirm, db),
+                [confirm_box, hidden_hash, bond_state],
+                light_button,
+            )
+            light_button.click(
+                partial(ui_pyre_ignite, db),
+                [hidden_hash, confirm_box, bond_state, burn_df_state],
+                [status_out, burnable_df, burn_df_state],
+            )
+            gr.Button("Refresh Offerings").click(
+                partial(ui_pyre_refresh, db), None, [burnable_df, burn_df_state]
+            )
 
         # The Loom
         with gr.Tab("🕸️ The Loom"):
-            loom_filter = gr.Dropdown(["All", "person", "org", "date", "location", "amount", "topic"], value="All", label="Filter type")
+            loom_filter = gr.Dropdown(
+                ["All", "person", "org", "date", "location", "amount", "topic"],
+                value="All",
+                label="Filter type",
+            )
             loom_search = gr.Textbox(label="Search entity", placeholder="Acme Corp")
             with gr.Row():
                 refresh_loom = gr.Button("Refresh the Loom")
@@ -3370,9 +3925,13 @@ def build_ui(db, index, metadata):
                 export_btn = gr.Button("Weave to Markdown")
 
             loom_plot = gr.Plot() if HAS_PLOTLY else gr.HTML()
-            loom_narrative = gr.Markdown("Step into my Loom, mortal. These threads have grown fat with meaning.")
+            loom_narrative = gr.Markdown(
+                "Step into my Loom, mortal. These threads have grown fat with meaning."
+            )
 
-            refresh_loom.click(partial(ui_loom_update, db), [loom_filter, loom_search], loom_plot)
+            refresh_loom.click(
+                partial(ui_loom_update, db), [loom_filter, loom_search], loom_plot
+            )
             clusters_btn.click(partial(ui_loom_clusters, db), None, loom_narrative)
             loom_search.submit(partial(ui_loom_search, db), loom_search, loom_narrative)
             export_btn.click(partial(ui_loom_export, db), None, loom_narrative)
@@ -3386,12 +3945,16 @@ def build_ui(db, index, metadata):
                 weave_mirror = gr.Button("Weave a New Reflection")
 
             refresh_mirror.click(partial(ui_mirror_read, db), None, mirror_output)
-            weave_mirror.click(partial(ui_mirror_weave, db), None, [mirror_output, mirror_status])
+            weave_mirror.click(
+                partial(ui_mirror_weave, db), None, [mirror_output, mirror_status]
+            )
 
         # Settings
         with gr.Tab("⚙️ Settings"):
             gr.Markdown("### Identity")
-            s_name = gr.Textbox(label="Familiar Name", value=pet_name, placeholder="Grimalkin")
+            s_name = gr.Textbox(
+                label="Familiar Name", value=pet_name, placeholder="Grimalkin"
+            )
             s_address = gr.Textbox(
                 label="Address Me As",
                 value=get_setting(db, "user_address", "mortal"),
@@ -3399,7 +3962,9 @@ def build_ui(db, index, metadata):
             )
             save_settings_btn = gr.Button("Apply", variant="primary")
             settings_status = gr.Markdown()
-            save_settings_btn.click(partial(ui_save_settings, db), [s_name, s_address], settings_status)
+            save_settings_btn.click(
+                partial(ui_save_settings, db), [s_name, s_address], settings_status
+            )
 
             gr.Markdown("### Behavior")
             s_serious = gr.Checkbox(
@@ -3450,7 +4015,7 @@ def build_ui(db, index, metadata):
             avatar_upload.change(ui_save_avatar, avatar_upload, avatar_status)
 
         # Footer
-        gr.HTML(f"""
+        gr.HTML("""
         <div class="grim-footer">
             <span class="footer-disclaimer">Grimalkin uses AI to generate responses. AI can make mistakes — always verify important information.</span>
             <span class="footer-sig">100%% local &middot; your data never leaves this machine</span>
@@ -3461,6 +4026,7 @@ def build_ui(db, index, metadata):
 
 
 # ─── Scheduler ─────────────────────────────────────────────────────────────────
+
 
 def start_scheduler(index, metadata, interval_hours=24, scan_minutes=30):
     def loop():
@@ -3476,13 +4042,63 @@ def start_scheduler(index, metadata, interval_hours=24, scan_minutes=30):
                     nightly_groom_v4(db, index, metadata)
             except Exception as e:
                 log.error(f"Scheduler task failed: {e}")
+
     Thread(target=loop, daemon=True).start()
-    log.info(f"Scheduler armed — scan every {scan_minutes}m, groom every {interval_hours}h.")
+    log.info(
+        f"Scheduler armed — scan every {scan_minutes}m, groom every {interval_hours}h."
+    )
+
+
+# ─── Auth ──────────────────────────────────────────────────────────────────────
+
+
+def _check_auth(username: str, password: str) -> bool:
+    """Token-based authentication guard for Gradio.
+
+    When GRIM_AUTH_TOKEN is set, the user must enter the token in the
+    password field of the login prompt (the username field is ignored).
+
+    TODO: TLS termination — Gradio does not support TLS natively. Deploy
+    behind a reverse proxy (nginx, caddy, etc.) with a valid certificate
+    before exposing to any untrusted network.
+    """
+    expected = CFG.auth_token
+    if not expected:
+        return True
+    return password == expected
 
 
 # ─── Main ──────────────────────────────────────────────────────────────────────
 
+
 def main():
+    parser = argparse.ArgumentParser(
+        description="Grimalkin - local file-sorting service",
+    )
+    parser.add_argument(
+        "--host",
+        default=CFG.host,
+        help="Bind address (default: 127.0.0.1). Use 0.0.0.0 for network access.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=CFG.port,
+        help="Server port (default: 7860)",
+    )
+    args = parser.parse_args()
+
+    host = args.host
+    if host not in ("127.0.0.1", "localhost", "::1") and not host.startswith("127."):
+        print(
+            "\n"
+            "  *** WARNING: non-loopback bind address ***\n"
+            f"  Binding to {host} — the server will be reachable on the network.\n"
+            "  Ensure a reverse proxy with TLS termination is in front of this\n"
+            "  service before exposing it to untrusted clients.\n",
+            file=sys.stderr,
+        )
+
     log.info(f"Grimalkin v{VERSION} awakening...")
 
     db = init_db()
@@ -3492,10 +4108,17 @@ def main():
 
     start_scheduler(index, metadata)
 
+    auth = _check_auth if CFG.auth_token else None
+
     gr.set_static_paths(paths=[str(APP_DIR)])
     demo = build_ui(db, index, metadata)
-    demo.launch(server_name=CFG.host, server_port=CFG.port, share=False,
-                allowed_paths=[str(APP_DIR)])
+    demo.launch(
+        server_name=host,
+        server_port=args.port,
+        share=False,
+        allowed_paths=[str(APP_DIR)],
+        auth=auth,
+    )
 
 
 if __name__ == "__main__":
