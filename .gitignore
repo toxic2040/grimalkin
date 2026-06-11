@@ -22,6 +22,7 @@ batch_experiment.py
 experiment_*_results.json
 experiment_*_results*.json
 equalization_chunks.json
+experiments/
 
 # Environment / secrets
 .env
