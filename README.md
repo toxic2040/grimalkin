@@ -11,13 +11,13 @@
 
 ---
 
-**~3500 LOC · 100% offline · Ollama + FAISS + Knowledge Graph**
+**~5200 LOC · 100% offline · Ollama + FAISS + Knowledge Graph**
 
-Grimalkin is a local AI familiar that sorts your files, indexes them for instant Q&A, builds a knowledge graph of everything it finds, and develops a personality that sharpens the longer you spend together. No cloud, no API keys, no tracking. One database, one bond, one cat.
+Grimalkin is a local AI familiar that sorts your files, indexes them for instant Q&A, builds a knowledge graph of everything it finds, and develops a personality that sharpens the longer you spend together. No cloud, no API keys, no network tracking. One database, one bond, one cat.
 
 ## What It Does
 
-**🐾 Scratch Post** — Chat with Grimalkin. Ask questions, run commands, or just talk. It remembers.
+**🐾 Scratch Post** — Chat with Grimalkin. Ask questions, run commands, use optional local push-to-talk, or just talk. It remembers.
 
 **🏹 The Hunt** — Scans your Downloads folder, classifies files by type, copies them into organized folders, and indexes the contents for search. Manual trigger — no background watchers.
 
@@ -30,6 +30,8 @@ Grimalkin is a local AI familiar that sorts your files, indexes them for instant
 **🕸️ The Loom** — Interactive knowledge graph visualization. Entities and relationships extracted from your files, rendered as a force-directed network. Filter by type, search by name, export to markdown.
 
 **🪞 The Mirror** — Weekly reflections generated from vault activity and graph growth. View past reflections and weave new ones directly from the tab. Grimalkin develops memory across time.
+
+**🛡️ Control Deck** — Local privacy posture for network endpoint, voice adapter readiness, plaintext memory, metadata-only audit trail, file access mode, and source state.
 
 **⚙️ Settings** — Name your familiar, set your title, upload an avatar, toggle sandbox mode, serious mode, graph injection, and custom categories. All runtime — no restarts.
 
@@ -72,6 +74,22 @@ python grimalkin.py
 
 Open **http://localhost:7860** in your browser. The cat is waiting.
 
+### Optional: local voice adapters
+
+The Scratch Post voice dock is disabled until local command templates are set. Grimalkin does not ship cloud STT/TTS bindings.
+
+```bash
+# STT receives {audio}; write transcript text to {out} or stdout.
+export GRIM_STT_COMMAND='whisper-cli {audio} --output-txt {out}'
+
+# TTS receives response text on stdin unless {text} or {text_file} is used;
+# write playable audio to {out}.
+export GRIM_TTS_COMMAND='piper --model /path/to/voice.onnx --output_file {out}'
+
+# Default false: discard browser microphone temp files after transcription.
+export GRIM_KEEP_VOICE_AUDIO=false
+```
+
 ## Scratch Post Commands
 
 | Command | What it does |
@@ -109,6 +127,8 @@ Open **http://localhost:7860** in your browser. The cat is waiting.
 
 **The Mirror:** Weekly reflections are generated automatically during the nightly groom cycle, or on demand from The Mirror tab. Each reflection synthesizes vault activity, graph growth, and top entities into a 2–3 sentence entry in Grimalkin's voice, stored permanently in the database.
 
+**Control Deck:** The deck renders the current local posture: Ollama endpoint classification, STT/TTS command availability, SQLite/vector-store footprint, audit event count, file access mode, and git source state. The audit trail stores action metadata only, not prompts, transcripts, or file contents.
+
 ## Supported File Types
 
 **Full indexing:** PDF, TXT, MD, HTML, CSV, DOCX, DOC, Python, JavaScript, TypeScript, Shell, C/C++, Java, Go, Rust, Ruby, Perl, Lua, Swift, Kotlin, TOML, JSON, YAML, XML, INI, CFG, RTF, LOG
@@ -119,7 +139,7 @@ Open **http://localhost:7860** in your browser. The cat is waiting.
 
 ```
 grimalkin/
-├── grimalkin.py              # Main application (~3500 LOC)
+├── grimalkin.py              # Main application (~5200 LOC)
 ├── grimalkin_core.py         # Engine — config, DB, bond, persona, search
 ├── grimalkin_features.py     # Feature handlers — hunt, groom, pyre, mirror
 ├── grimalkin_interfaces.py   # Gradio UI builder

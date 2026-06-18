@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Grimalkin v4.1 — The Mirror Wakes
-===================================
+Grimalkin v5.0.1 — Privacy Control Deck
+=========================================
 
 A 100% local AI file-sorting familiar with persistent memory, FAISS-powered
 hybrid RAG, knowledge graph (The Web), ritual burn ceremony (The Pyre),
@@ -18,7 +18,10 @@ Repo: https://github.com/toxic2040/grimalkin
 # ─── Imports ───────────────────────────────────────────────────────────────────
 
 import argparse
+import calendar
 import hashlib
+import html
+import importlib.util
 import json
 import logging
 import math
@@ -29,8 +32,10 @@ import shutil
 import sqlite3
 import shlex
 import sys
+import subprocess
 import time
 import threading
+import tempfile
 import uuid
 from collections import namedtuple
 from dataclasses import dataclass, fields
@@ -38,6 +43,7 @@ from datetime import datetime, timezone, date
 from functools import partial
 from pathlib import Path
 from threading import Thread
+from urllib.parse import urlparse
 
 # ─── Dependency Pre-flight ─────────────────────────────────────────────────────
 
@@ -49,7 +55,7 @@ _REQUIRED = [
     ("langchain-community", "langchain_community"),
 ]
 _missing = [
-    pkg for pkg, mod in _REQUIRED if __import__("importlib").util.find_spec(mod) is None
+    pkg for pkg, mod in _REQUIRED if importlib.util.find_spec(mod) is None
 ]
 if _missing:
     print("\nGrimalkin cannot wake — missing dependencies:")
@@ -57,6 +63,8 @@ if _missing:
         print(f"  • {pkg}")
     print("\nFix:  pip install -r requirements.txt\n")
     raise SystemExit(1)
+
+os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
 
 import faiss  # noqa: E402
 import gradio as gr  # noqa: E402
@@ -90,7 +98,7 @@ except ImportError:
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
 
-VERSION = "5.0"
+VERSION = "5.0.1"
 APP_DIR = Path(__file__).resolve().parent
 VAULT_DIR = APP_DIR / "vault"
 SORTED_BASE = APP_DIR / "sorted"
@@ -117,6 +125,9 @@ class GrimConfig:
     host: str = "127.0.0.1"
     port: int = 7860
     auth_token: str = ""  # set GRIM_AUTH_TOKEN to require login
+    stt_command: str = ""  # local PTT transcription command template
+    tts_command: str = ""  # local response speech command template
+    keep_voice_audio: bool = False
     graph_injection: str = "auto"  # "auto", "always", "never"
     sandbox: bool = False  # dry-run mode for Pyre — no real deletions
     # Bond gates
@@ -369,6 +380,9 @@ def init_db() -> sqlite3.Connection:
         "custom_categories": "[]",
         "burn_timestamps": "[]",
         "burn_count": "0",
+        "network_policy": "local_only_advisory",
+        "memory_mode": "local_plaintext",
+        "audit_enabled": "1",
     }
     for k, v in defaults.items():
         db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
@@ -567,6 +581,20 @@ def set_setting(db, key, value):
         "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value))
     )
     db.commit()
+
+
+def audit_event(db, event_type: str, detail: str = ""):
+    """Record local action metadata without storing prompts or file contents."""
+    if not db or get_setting(db, "audit_enabled", "1") != "1":
+        return
+    try:
+        db.execute(
+            "INSERT INTO audit_log (event_type, detail) VALUES (?, ?)",
+            (_clip(event_type, 64), _clip(detail, 240)),
+        )
+        db.commit()
+    except Exception as e:
+        log.warning(f"Audit event failed: {e}")
 
 
 BondTransition = namedtuple("BondTransition", ["old_tier", "new_tier"])
@@ -878,6 +906,24 @@ def classify_query(text: str) -> str:
 OllamaResult = namedtuple("OllamaResult", ["text", "logprobs"])
 
 
+def _with_no_think(prompt: str, model: str) -> str:
+    model_name = (model or "").lower()
+    if "qwen3" not in model_name:
+        return prompt
+    if re.search(r"/(?:no_)?think\b", prompt, flags=re.IGNORECASE):
+        return prompt
+    return f"{prompt}\n/no_think"
+
+
+def _strip_think_artifacts(text: str, model: str) -> str:
+    if "qwen3" not in (model or "").lower():
+        return text
+    cleaned = re.sub(r"(?is)<think>.*?</think>\s*", "", text).strip()
+    cleaned = re.sub(r"(?im)^\s*/(?:no_)?think\s*$", "", cleaned).strip()
+    cleaned = re.sub(r"\s+/(?:no_)?think\s*$", "", cleaned).strip()
+    return cleaned
+
+
 def ollama_chat(
     prompt: str,
     system: str = "",
@@ -893,6 +939,8 @@ def ollama_chat(
     Retries with exponential backoff on connection failures."""
     if not HAS_REQUESTS:
         return OllamaResult("Hrk. Hairball. The requests library is missing.", [])
+    model = model or CFG.ollama_model
+    prompt = _with_no_think(prompt, model)
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -917,6 +965,7 @@ def ollama_chat(
             data = resp.json()
             choice = data.get("choices", [{}])[0]
             text = choice.get("message", {}).get("content", "").strip()
+            text = _strip_think_artifacts(text, model)
             lp_data = choice.get("logprobs", {})
             logprobs = lp_data.get("content", []) if lp_data else []
             return OllamaResult(text, logprobs)
@@ -3126,14 +3175,21 @@ GRIM_CSS = """
 
 /* ─── Header ─────────────────────────────────────────────────────── */
 .grim-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    padding: 1.2rem 1.5rem 0.6rem;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
+    gap: 1.3rem;
+    align-items: start;
+    padding: 1.2rem 1.5rem 0.8rem;
 }
 .grim-header-left {
-    flex: 1;
     min-width: 0;
+}
+.grim-header-right {
+    min-width: 0;
+    display: grid;
+    justify-items: end;
+    align-content: start;
+    gap: 0.75rem;
 }
 .grim-header .name-row {
     display: flex;
@@ -3202,12 +3258,124 @@ GRIM_CSS = """
     max-width: 520px;
 }
 
+/* ─── Local Clock / Calendar ────────────────────────────────────── */
+.grim-side-panel {
+    width: 100%;
+    max-width: 380px;
+    min-width: 0;
+    padding: 0.74rem 0.8rem;
+    border: 1px solid rgba(30, 46, 42, 0.55);
+    border-radius: 8px;
+    background: rgba(10, 14, 18, 0.58);
+    box-shadow: inset 0 1px 0 rgba(200, 214, 229, 0.035);
+}
+.privacy-line {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    font-size: 0.64rem;
+    color: #789;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.privacy-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #00e6b0;
+    box-shadow: 0 0 12px rgba(0, 230, 176, 0.55);
+    flex: 0 0 auto;
+}
+.time-stack {
+    display: grid;
+    grid-template-columns: minmax(72px, 88px) minmax(210px, 1fr);
+    gap: 0.75rem;
+    align-items: center;
+    margin-top: 0.75rem;
+}
+#grim-live-clock {
+    display: block;
+    font-size: 1.05rem;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    color: #dbe7ee;
+    letter-spacing: 0;
+}
+.clock-date {
+    margin-top: 0.3rem;
+    font-size: 0.63rem;
+    color: #667788;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+.month-card {
+    width: min(100%, 244px);
+    justify-self: end;
+}
+.month-label {
+    margin-bottom: 0.25rem;
+    font-size: 0.62rem;
+    color: #00e6b0;
+    opacity: 0.72;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    text-align: center;
+}
+.mini-calendar {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+}
+.mini-calendar th,
+.mini-calendar td {
+    width: 14.28%;
+    height: 17px;
+    text-align: center;
+    font-size: 0.62rem;
+    color: #586879;
+    font-variant-numeric: tabular-nums;
+}
+.mini-calendar th {
+    color: #73889a;
+    font-weight: 500;
+}
+.mini-calendar .cal-empty {
+    color: transparent;
+}
+.mini-calendar .cal-today {
+    color: #07110e;
+    background: #00d49c;
+    border-radius: 4px;
+    font-weight: 700;
+}
+.local-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin-top: 0.75rem;
+}
+.local-badges span {
+    max-width: 100%;
+    padding: 0.2rem 0.42rem;
+    border: 1px solid rgba(0, 230, 176, 0.14);
+    border-radius: 999px;
+    color: #8da0aa;
+    background: rgba(0, 230, 176, 0.035);
+    font-size: 0.61rem;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 /* ─── Avatar ─────────────────────────────────────────────────────── */
 .grim-avatar {
-    flex-shrink: 0;
     width: 160px;
     height: 160px;
-    border-radius: 12px;
+    border-radius: 8px;
     overflow: hidden;
     border: 1px solid rgba(0, 230, 176, 0.2);
     box-shadow: 0 0 12px rgba(0, 230, 176, 0.08), 0 0 30px rgba(0, 230, 176, 0.03);
@@ -3231,10 +3399,9 @@ GRIM_CSS = """
 }
 /* Placeholder when no image */
 .grim-avatar-empty {
-    flex-shrink: 0;
     width: 160px;
     height: 160px;
-    border-radius: 12px;
+    border-radius: 8px;
     border: 1px dashed rgba(0, 230, 176, 0.15);
     display: flex;
     align-items: center;
@@ -3242,6 +3409,49 @@ GRIM_CSS = """
     color: rgba(0, 230, 176, 0.2);
     font-size: 1.8rem;
     margin-top: 0.2rem;
+}
+
+@media (max-width: 920px) {
+    .grim-header {
+        grid-template-columns: 1fr;
+    }
+    .grim-header-right {
+        grid-template-columns: 120px minmax(0, 1fr);
+        align-items: start;
+        justify-items: start;
+        width: 100%;
+    }
+    .grim-side-panel {
+        max-width: none;
+        align-self: start;
+    }
+    .grim-avatar,
+    .grim-avatar-empty {
+        width: 120px;
+        height: 120px;
+    }
+}
+
+@media (max-width: 620px) {
+    .grim-header {
+        grid-template-columns: 1fr;
+        padding: 1rem 1rem 0.7rem;
+    }
+    .grim-avatar,
+    .grim-avatar-empty {
+        width: 96px;
+        height: 96px;
+    }
+    .grim-header-right {
+        grid-template-columns: 1fr;
+    }
+    .time-stack {
+        grid-template-columns: minmax(60px, 72px) minmax(180px, 1fr);
+    }
+    .month-card {
+        width: min(100%, 244px);
+        justify-self: end;
+    }
 }
 
 /* ─── Tabs ───────────────────────────────────────────────────────── */
@@ -3329,6 +3539,31 @@ textarea, input[type="text"], .wrap {
 textarea:focus, input[type="text"]:focus {
     border-color: #00e6b0 !important;
     box-shadow: 0 0 8px rgba(0, 230, 176, 0.15) !important;
+}
+.voice-dock {
+    margin-top: 0.7rem;
+    padding: 0.55rem 0.65rem !important;
+    border: 1px solid rgba(30, 46, 42, 0.42) !important;
+    border-radius: 8px !important;
+    background: rgba(10, 14, 18, 0.45) !important;
+}
+.voice-dock label {
+    color: #73889a !important;
+    font-size: 0.68rem !important;
+    letter-spacing: 0.08em !important;
+    text-transform: uppercase !important;
+}
+.voice-actions {
+    align-items: end !important;
+    gap: 0.55rem !important;
+}
+.voice-actions button {
+    min-height: 2.1rem !important;
+}
+.voice-status .prose {
+    margin-top: 0.35rem !important;
+    color: #667788 !important;
+    font-size: 0.72rem !important;
 }
 
 /* ─── Markdown ───────────────────────────────────────────────────── */
@@ -3434,6 +3669,271 @@ textarea:focus, input[type="text"]:focus {
     border-bottom: 1px solid rgba(30, 46, 42, 0.2);
 }
 
+/* ─── Pulse Rail ────────────────────────────────────────────────── */
+.pulse-rail {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 0.75rem;
+    align-items: stretch;
+    margin: 0.15rem 1.5rem 0.8rem;
+    padding: 0.55rem 0;
+    border-top: 1px solid rgba(30, 46, 42, 0.22);
+    border-bottom: 1px solid rgba(30, 46, 42, 0.22);
+}
+.pulse-heading {
+    display: flex;
+    align-items: center;
+    color: #00e6b0;
+    opacity: 0.68;
+    font-size: 0.66rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+}
+.pulse-track {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(180px, 240px);
+    gap: 0.55rem;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scroll-snap-type: inline proximity;
+    padding-bottom: 0.15rem;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(0, 230, 176, 0.28) transparent;
+}
+.pulse-item {
+    min-width: 0;
+    scroll-snap-align: start;
+    padding: 0.55rem 0.65rem;
+    border: 1px solid rgba(35, 55, 52, 0.62);
+    border-radius: 8px;
+    background: rgba(13, 17, 24, 0.72);
+}
+.pulse-kind,
+.pulse-meta {
+    display: block;
+    color: #667788;
+    font-size: 0.58rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.pulse-item strong {
+    display: block;
+    margin-top: 0.18rem;
+    color: #d8e1e7;
+    font-size: 0.78rem;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.pulse-item p {
+    margin: 0.16rem 0 0.25rem;
+    color: #8da0aa;
+    font-size: 0.68rem;
+    line-height: 1.35;
+    min-height: 1.84em;
+}
+.pulse-meta {
+    color: #516171;
+    font-size: 0.55rem;
+}
+
+@media (max-width: 620px) {
+    .pulse-rail {
+        grid-template-columns: 1fr;
+        margin-inline: 1rem;
+    }
+    .pulse-track {
+        grid-auto-columns: minmax(170px, 78vw);
+    }
+}
+
+/* ─── Control Deck ───────────────────────────────────────────────── */
+.control-deck {
+    display: grid;
+    gap: 0.95rem;
+    padding: 0.1rem 0 0.4rem;
+}
+.control-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: end;
+    gap: 1rem;
+    padding: 0.3rem 0.1rem 0.1rem;
+    border-bottom: 1px solid rgba(30, 46, 42, 0.32);
+}
+.control-head span,
+.control-audit > div > span {
+    display: block;
+    color: #00e6b0;
+    opacity: 0.68;
+    font-size: 0.62rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+}
+.control-head h2,
+.control-audit h3 {
+    margin: 0.12rem 0 0;
+    color: #dbe7ee;
+    font-size: 1.05rem;
+    font-weight: 500;
+    letter-spacing: 0;
+}
+.control-head p {
+    margin: 0;
+    color: #667788;
+    font-size: 0.68rem;
+    font-variant-numeric: tabular-nums;
+}
+.control-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.75rem;
+}
+.control-card {
+    min-width: 0;
+    min-height: 122px;
+    padding: 0.72rem 0.78rem;
+    border: 1px solid rgba(35, 55, 52, 0.62);
+    border-radius: 8px;
+    background: rgba(13, 17, 24, 0.74);
+    box-shadow: inset 0 1px 0 rgba(200, 214, 229, 0.035);
+}
+.control-card .control-state {
+    display: inline-flex;
+    align-items: center;
+    max-width: 100%;
+    padding: 0.13rem 0.38rem;
+    border-radius: 999px;
+    font-size: 0.54rem;
+    line-height: 1.2;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+}
+.control-card strong {
+    display: block;
+    margin-top: 0.5rem;
+    color: #8da0aa;
+    font-size: 0.62rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+}
+.control-card b {
+    display: block;
+    margin-top: 0.2rem;
+    color: #dbe7ee;
+    font-size: 0.98rem;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.control-card p {
+    margin: 0.3rem 0 0;
+    color: #718496;
+    font-size: 0.69rem;
+    line-height: 1.38;
+}
+.control-ok {
+    border-color: rgba(0, 230, 176, 0.26);
+}
+.control-ok .control-state {
+    color: #06130f;
+    background: #00d49c;
+}
+.control-warn {
+    border-color: rgba(226, 178, 97, 0.32);
+}
+.control-warn .control-state {
+    color: #f3cf8b;
+    background: rgba(226, 178, 97, 0.12);
+}
+.control-bad {
+    border-color: rgba(214, 83, 83, 0.34);
+}
+.control-bad .control-state {
+    color: #ffb3ad;
+    background: rgba(214, 83, 83, 0.14);
+}
+.control-audit {
+    padding: 0.78rem;
+    border: 1px solid rgba(30, 46, 42, 0.42);
+    border-radius: 8px;
+    background: rgba(10, 14, 18, 0.45);
+}
+.control-audit-list {
+    display: grid;
+    gap: 0.45rem;
+    margin: 0.7rem 0 0;
+    padding: 0;
+    list-style: none;
+}
+.control-audit-list li {
+    display: grid;
+    grid-template-columns: minmax(120px, 0.55fr) minmax(100px, 0.45fr) minmax(0, 1fr);
+    gap: 0.65rem;
+    align-items: baseline;
+    padding: 0.42rem 0;
+    border-top: 1px solid rgba(30, 46, 42, 0.26);
+}
+.control-audit-list li:first-child {
+    border-top: none;
+}
+.control-audit-list li span,
+.control-audit-list li strong,
+.control-audit-list li p {
+    min-width: 0;
+    margin: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.control-audit-list li span {
+    color: #516171;
+    font-size: 0.62rem;
+    font-variant-numeric: tabular-nums;
+}
+.control-audit-list li strong {
+    color: #d8e1e7;
+    font-size: 0.7rem;
+    font-weight: 600;
+}
+.control-audit-list li p,
+.control-empty {
+    color: #718496;
+    font-size: 0.68rem;
+}
+
+@media (max-width: 920px) {
+    .control-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .control-audit-list li {
+        grid-template-columns: minmax(100px, 0.8fr) minmax(0, 1fr);
+    }
+    .control-audit-list li p {
+        grid-column: 1 / -1;
+        white-space: normal;
+    }
+}
+
+@media (max-width: 620px) {
+    .control-head {
+        display: grid;
+        align-items: start;
+    }
+    .control-grid {
+        grid-template-columns: 1fr;
+    }
+    .control-card {
+        min-height: auto;
+    }
+}
+
 /* ─── Footer ─────────────────────────────────────────────────────── */
 .grim-footer {
     display: flex;
@@ -3468,6 +3968,24 @@ textarea:focus, input[type="text"]:focus {
         radial-gradient(ellipse at 50% 100%, rgba(0, 50, 40, 0.04) 0%, transparent 40%);
     pointer-events: none;
     z-index: 0;
+}
+"""
+
+
+GRIM_JS = """
+() => {
+    const tick = () => {
+        document.querySelectorAll("#grim-live-clock").forEach((clock) => {
+            const now = new Date();
+            clock.textContent = now.toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+            });
+            clock.setAttribute("datetime", now.toISOString());
+        });
+    };
+    tick();
+    setInterval(tick, 30000);
 }
 """
 
@@ -3539,6 +4057,11 @@ def ui_chat(db, index, metadata, session_id, message, history):
 
     save_chat_message(db, session_id, "user", display_text)
     save_chat_message(db, session_id, "assistant", resp)
+    audit_event(
+        db,
+        "scratch_post",
+        f"text={bool(text)} files={len(files)} session={session_id[:8]}",
+    )
     try:
         update_chat_summary(db, session_id)
     except Exception as e:
@@ -3550,6 +4073,7 @@ def ui_chat(db, index, metadata, session_id, message, history):
 
 def ui_hunt(db, index, metadata):
     results = run_hunt(db, index, metadata)
+    audit_event(db, "hunt_scan", f"{len(results)} new file(s)")
     if not results:
         return "The hunting grounds are quiet."
     lines = [f"**Caught {len(results)} new file{'s' if len(results) != 1 else ''}:**"]
@@ -3650,6 +4174,593 @@ def get_graph_injection(db) -> str:
     return CFG.graph_injection
 
 
+def _esc(value) -> str:
+    return html.escape(str(value), quote=True)
+
+
+def _clip(text: str, limit: int = 96) -> str:
+    text = " ".join(str(text).split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+VOICE_TMP_DIR = Path(tempfile.gettempdir()) / "grimalkin_voice"
+
+
+def _voice_template_values(**extra) -> dict[str, str]:
+    values = {"tmp": str(VOICE_TMP_DIR)}
+    values.update({k: str(v) for k, v in extra.items()})
+    return values
+
+
+def _run_local_voice_command(
+    template: str,
+    values: dict[str, str],
+    *,
+    default_arg: str = "",
+    stdin: str | None = None,
+    timeout: int = 180,
+) -> subprocess.CompletedProcess:
+    if not template.strip():
+        raise ValueError("empty command template")
+    VOICE_TMP_DIR.mkdir(parents=True, exist_ok=True)
+    parts = [part.format(**values) for part in shlex.split(template)]
+    if default_arg and "{" + default_arg + "}" not in template:
+        parts.append(values[default_arg])
+    return subprocess.run(
+        parts,
+        input=stdin,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def _discard_gradio_audio(audio_path: str | None) -> bool:
+    if not audio_path or CFG.keep_voice_audio:
+        return False
+    try:
+        path = Path(audio_path).resolve()
+        tmp_root = Path(tempfile.gettempdir()).resolve()
+        if path.exists() and tmp_root in path.parents:
+            path.unlink()
+            return True
+    except OSError as e:
+        log.warning(f"Voice audio cleanup failed: {e}")
+    return False
+
+
+def transcribe_local_audio(audio_path: str | None) -> tuple[str, str]:
+    """Transcribe a microphone capture with a local command template."""
+    if not audio_path:
+        return "", "No audio captured."
+    command = CFG.stt_command or os.environ.get("GRIM_STT_COMMAND", "")
+    if not command.strip():
+        return "", "Local speech input is not configured. Set GRIM_STT_COMMAND."
+    output_path = VOICE_TMP_DIR / f"transcript_{uuid.uuid4().hex}.txt"
+    values = _voice_template_values(audio=audio_path, out=output_path)
+    try:
+        proc = _run_local_voice_command(
+            command,
+            values,
+            default_arg="audio",
+            timeout=180,
+        )
+    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+        return "", f"Local speech input failed: {_clip(e, 140)}"
+    transcript = ""
+    if output_path.exists():
+        transcript = output_path.read_text(encoding="utf-8", errors="replace").strip()
+        try:
+            output_path.unlink()
+        except OSError as e:
+            log.warning(f"Voice transcript cleanup failed: {e}")
+    if not transcript:
+        transcript = proc.stdout.strip()
+    if proc.returncode != 0:
+        err = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+        return "", f"Local speech input failed: {_clip(err, 160)}"
+    if not transcript:
+        return "", "Local speech input returned no transcript."
+    return transcript, "Voice transcript captured locally."
+
+
+def synthesize_local_reply(text: str) -> tuple[str | None, str]:
+    """Render a reply through an optional local TTS command template."""
+    command = CFG.tts_command or os.environ.get("GRIM_TTS_COMMAND", "")
+    if not command.strip() or not text.strip():
+        return None, "Local voice output is not configured."
+    text_path = VOICE_TMP_DIR / f"reply_{uuid.uuid4().hex}.txt"
+    output_path = VOICE_TMP_DIR / f"reply_{uuid.uuid4().hex}.wav"
+    VOICE_TMP_DIR.mkdir(parents=True, exist_ok=True)
+    text_path.write_text(text, encoding="utf-8")
+    values = _voice_template_values(text=text, text_file=text_path, out=output_path)
+    stdin = text if "{text}" not in command and "{text_file}" not in command else None
+    try:
+        proc = _run_local_voice_command(
+            command,
+            values,
+            default_arg="out",
+            stdin=stdin,
+            timeout=180,
+        )
+    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+        try:
+            text_path.unlink()
+        except OSError as cleanup_err:
+            log.warning(f"Voice text cleanup failed: {cleanup_err}")
+        return None, f"Local voice output failed: {_clip(e, 140)}"
+    try:
+        text_path.unlink()
+    except OSError as e:
+        log.warning(f"Voice text cleanup failed: {e}")
+    if proc.returncode != 0:
+        err = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+        return None, f"Local voice output failed: {_clip(err, 160)}"
+    if not output_path.exists():
+        return None, "Local voice output did not produce audio."
+    return str(output_path), "Reply voice rendered locally."
+
+
+def ui_voice_chat(db, index, metadata, session_id, audio_path, history):
+    history = history or []
+    transcript, voice_status = transcribe_local_audio(audio_path)
+    discarded = _discard_gradio_audio(audio_path)
+    if CFG.keep_voice_audio:
+        retention = "Input audio kept by configuration."
+    elif discarded:
+        retention = "Input audio discarded."
+    else:
+        retention = "Input audio not retained by Grimalkin."
+    if not transcript:
+        return (
+            history,
+            f"{voice_status} {retention}",
+            gr.update(value=None, visible=False),
+        )
+
+    egg = check_easter_eggs(transcript, db=db)
+    resp = (
+        egg
+        if egg
+        else handle_scratch_post(db, index, metadata, transcript, session_id=session_id)
+    )
+    pending = get_pending_notifications(db)
+    if pending:
+        resp = f"{format_notifications(pending)}\n\n---\n\n{resp}"
+
+    display_text = f"[voice] {transcript}"
+    save_chat_message(db, session_id, "user", display_text)
+    save_chat_message(db, session_id, "assistant", resp)
+    audit_event(
+        db,
+        "voice_chat",
+        f"transcript_chars={len(transcript)} session={session_id[:8]}",
+    )
+    try:
+        update_chat_summary(db, session_id)
+    except Exception as e:
+        log.warning(f"Chat summary update failed: {e}")
+
+    audio_reply, audio_status = synthesize_local_reply(resp)
+    status = f"{voice_status} {retention} {audio_status}"
+    history.append({"role": "user", "content": display_text})
+    history.append({"role": "assistant", "content": resp})
+    return history, status, gr.update(value=audio_reply, visible=bool(audio_reply))
+
+
+def _month_calendar(today: date | None = None) -> str:
+    today = today or date.today()
+    cal = calendar.Calendar(firstweekday=6)
+    weeks = cal.monthdayscalendar(today.year, today.month)
+    labels = ("S", "M", "T", "W", "T", "F", "S")
+    head = "".join(f"<th>{d}</th>" for d in labels)
+    rows = []
+    for week in weeks:
+        cells = []
+        for day in week:
+            if day == 0:
+                cells.append("<td class='cal-empty'></td>")
+            elif day == today.day:
+                cells.append(f"<td class='cal-today'>{day}</td>")
+            else:
+                cells.append(f"<td>{day}</td>")
+        rows.append("<tr>" + "".join(cells) + "</tr>")
+    return (
+        "<table class='mini-calendar' aria-label='Current month'>"
+        f"<thead><tr>{head}</tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+    )
+
+
+def ui_header_panel(db) -> str:
+    """Build the compact local clock, calendar, and privacy status cluster."""
+    now = datetime.now()
+    today = now.date()
+    mode = "sandbox" if is_sandbox(db) else "live"
+    graph_mode = get_graph_injection(db)
+    model = _clip(CFG.ollama_model, 26)
+    embed = _clip(CFG.embed_model, 24)
+    endpoint = _clip(CFG.ollama_url.replace("http://", "").replace("https://", ""), 24)
+    return f"""
+    <div class="grim-side-panel">
+        <div class="privacy-line">
+            <span class="privacy-dot"></span>
+            <span>local vault</span>
+            <span>{_esc(endpoint)}</span>
+        </div>
+        <div class="time-stack">
+            <div>
+                <time id="grim-live-clock" datetime="{_esc(now.isoformat())}">{_esc(now.strftime("%H:%M"))}</time>
+                <div class="clock-date">{_esc(today.strftime("%a %b %d"))}</div>
+            </div>
+            <div class="month-card">
+                <div class="month-label">{_esc(today.strftime("%b %Y"))}</div>
+                {_month_calendar(today)}
+            </div>
+        </div>
+        <div class="local-badges" aria-label="Local runtime status">
+            <span>{_esc(model)}</span>
+            <span>{_esc(embed)}</span>
+            <span>{_esc(mode)}</span>
+            <span>graph {_esc(graph_mode)}</span>
+        </div>
+    </div>
+    """
+
+
+def _peek_notifications(db, limit: int = 3) -> list[dict]:
+    cur = db.cursor()
+    cur.execute(
+        """
+        SELECT type, detail, created_at
+        FROM notifications
+        WHERE seen=0
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    return [
+        {"type": row[0], "detail": row[1], "created_at": row[2]}
+        for row in cur.fetchall()
+    ]
+
+
+def _pulse_items(db) -> list[dict]:
+    cur = db.cursor()
+    items = []
+
+    for note in _peek_notifications(db):
+        items.append(
+            {
+                "kind": note["type"].replace("_", " "),
+                "title": "watch",
+                "detail": note["detail"],
+                "meta": note["created_at"] or "",
+            }
+        )
+
+    cur.execute(
+        """
+        SELECT filename, category, indexed, created_at
+        FROM file_memory
+        WHERE burned_at IS NULL
+        ORDER BY datetime(created_at) DESC, id DESC
+        LIMIT 4
+        """
+    )
+    for filename, category, indexed, created_at in cur.fetchall():
+        state = "indexed" if indexed else "waiting"
+        items.append(
+            {
+                "kind": category or "file",
+                "title": filename,
+                "detail": state,
+                "meta": created_at or "",
+            }
+        )
+
+    cur.execute("SELECT COUNT(*) FROM file_memory WHERE burned_at IS NULL AND indexed=0")
+    waiting = cur.fetchone()[0]
+    if waiting:
+        items.append(
+            {
+                "kind": "index",
+                "title": f"{waiting} unindexed",
+                "detail": "quiet backlog",
+                "meta": "local",
+            }
+        )
+
+    cur.execute(
+        """
+        SELECT name, type, times_seen
+        FROM entities
+        WHERE importance=1
+        ORDER BY times_seen DESC, name COLLATE NOCASE
+        LIMIT 4
+        """
+    )
+    for name, etype, times_seen in cur.fetchall():
+        items.append(
+            {
+                "kind": etype or "entity",
+                "title": name,
+                "detail": f"watched · {times_seen} sightings",
+                "meta": "important",
+            }
+        )
+
+    cur.execute(
+        "SELECT reflection_date, summary FROM reflections ORDER BY reflection_date DESC LIMIT 1"
+    )
+    reflection = cur.fetchone()
+    if reflection:
+        items.append(
+            {
+                "kind": "mirror",
+                "title": reflection[0],
+                "detail": reflection[1],
+                "meta": "latest",
+            }
+        )
+
+    if not items:
+        items.append(
+            {
+                "kind": "quiet",
+                "title": "vault quiet",
+                "detail": "no new files, no unread signals",
+                "meta": "local",
+            }
+        )
+    return items[:12]
+
+
+def ui_pulse_rail(db) -> str:
+    """Build a compact local activity rail for the top of the app."""
+    items = []
+    for item in _pulse_items(db):
+        items.append(
+            "<article class='pulse-item'>"
+            f"<span class='pulse-kind'>{_esc(item['kind'])}</span>"
+            f"<strong>{_esc(_clip(item['title'], 48))}</strong>"
+            f"<p>{_esc(_clip(item['detail'], 92))}</p>"
+            f"<span class='pulse-meta'>{_esc(_clip(item['meta'], 28))}</span>"
+            "</article>"
+        )
+    return (
+        "<section class='pulse-rail' aria-label='Local pulse'>"
+        "<div class='pulse-heading'>pulse</div>"
+        "<div class='pulse-track'>"
+        + "".join(items)
+        + "</div></section>"
+    )
+
+
+def _table_count(db, table: str, where: str = "") -> int:
+    try:
+        cur = db.cursor()
+        cur.execute(f"SELECT COUNT(*) FROM {table} {where}")
+        return int(cur.fetchone()[0])
+    except sqlite3.Error:
+        return 0
+
+
+def _command_status(command: str) -> tuple[str, str, str]:
+    command = (command or "").strip()
+    if not command:
+        return "missing", "not configured", "warn"
+    try:
+        exe = shlex.split(command)[0]
+    except ValueError as e:
+        return "invalid", _clip(e, 80), "bad"
+    exe_path = Path(exe).expanduser()
+    found = exe_path.exists() if exe_path.parent != Path(".") else shutil.which(exe)
+    if found:
+        return "ready", exe, "ok"
+    return "missing", f"{exe} not on PATH", "warn"
+
+
+def _is_loopback_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    return host in {"localhost", "::1"} or host.startswith("127.")
+
+
+def _human_size(path: Path) -> str:
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return "missing"
+    units = ("B", "KB", "MB", "GB")
+    value = float(size)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{size} B"
+
+
+def _git_snapshot() -> tuple[str, str, str]:
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=APP_DIR,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=APP_DIR,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return "unknown", _clip(e, 120), "warn"
+    head = sha.stdout.strip() if sha.returncode == 0 else "unknown"
+    dirty = bool(status.stdout.strip()) if status.returncode == 0 else True
+    if dirty:
+        return "modified", f"HEAD {head} · uncommitted local changes", "warn"
+    return "clean", f"HEAD {head}", "ok"
+
+
+def _latest_audit_events(db, limit: int = 6) -> list[dict]:
+    try:
+        cur = db.cursor()
+        cur.execute(
+            """
+            SELECT timestamp, event_type, detail
+            FROM audit_log
+            ORDER BY datetime(timestamp) DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return [
+            {"timestamp": row[0], "event_type": row[1], "detail": row[2]}
+            for row in cur.fetchall()
+        ]
+    except sqlite3.Error:
+        return []
+
+
+def _control_card(title: str, value: str, detail: str, state: str) -> str:
+    return (
+        f"<article class='control-card control-{_esc(state)}'>"
+        f"<span class='control-state'>{_esc(state)}</span>"
+        f"<strong>{_esc(title)}</strong>"
+        f"<b>{_esc(value)}</b>"
+        f"<p>{_esc(detail)}</p>"
+        "</article>"
+    )
+
+
+def ui_control_deck(db) -> str:
+    """Render the privacy posture control deck."""
+    stt_state, stt_detail, stt_class = _command_status(
+        CFG.stt_command or os.environ.get("GRIM_STT_COMMAND", "")
+    )
+    tts_state, tts_detail, tts_class = _command_status(
+        CFG.tts_command or os.environ.get("GRIM_TTS_COMMAND", "")
+    )
+    voice_class = "ok" if stt_class == "ok" and tts_class == "ok" else "warn"
+    voice_value = "ready" if voice_class == "ok" else "partial"
+
+    endpoint = CFG.ollama_url.replace("http://", "").replace("https://", "")
+    endpoint_local = _is_loopback_url(CFG.ollama_url)
+    network_value = "loopback" if endpoint_local else "external"
+    network_class = "warn" if endpoint_local else "bad"
+    network_detail = (
+        f"Ollama {endpoint}; outbound quarantine is advisory in this build"
+    )
+
+    audit_enabled = get_setting(db, "audit_enabled", "1") == "1"
+    audit_rows = _table_count(db, "audit_log")
+    audit_class = "ok" if audit_enabled else "bad"
+    audit_value = "enabled" if audit_enabled else "off"
+
+    chat_rows = _table_count(db, "chat_history")
+    vector_files = sum(1 for p in FAISS_INDEX_DIR.glob("*") if p.is_file())
+    memory_value = get_setting(db, "memory_mode", "local_plaintext").replace("_", " ")
+    memory_detail = (
+        f"DB {_human_size(DB_PATH)} · {chat_rows} chat rows · {vector_files} vector files"
+    )
+
+    files_total = _table_count(db, "file_memory", "WHERE burned_at IS NULL")
+    unindexed = _table_count(
+        db, "file_memory", "WHERE burned_at IS NULL AND indexed=0"
+    )
+    file_mode = "sandbox" if is_sandbox(db) else "live"
+    file_detail = (
+        f"{files_total} tracked files · {unindexed} waiting · scheduled hunt scans Downloads"
+    )
+
+    source_value, source_detail, source_class = _git_snapshot()
+
+    cards = [
+        _control_card(
+            "Network Gate",
+            network_value,
+            network_detail,
+            network_class,
+        ),
+        _control_card(
+            "Voice Path",
+            voice_value,
+            f"STT {stt_state}: {stt_detail}; TTS {tts_state}: {tts_detail}",
+            voice_class,
+        ),
+        _control_card(
+            "Memory Store",
+            memory_value,
+            memory_detail,
+            "warn",
+        ),
+        _control_card(
+            "Audit Trail",
+            audit_value,
+            f"{audit_rows} local metadata events; payloads omitted",
+            audit_class,
+        ),
+        _control_card(
+            "File Access",
+            file_mode,
+            file_detail,
+            "warn" if file_mode == "live" else "ok",
+        ),
+        _control_card(
+            "Source State",
+            source_value,
+            source_detail,
+            source_class,
+        ),
+    ]
+
+    audit_items = []
+    for event in _latest_audit_events(db):
+        audit_items.append(
+            "<li>"
+            f"<span>{_esc(event['timestamp'])}</span>"
+            f"<strong>{_esc(event['event_type'])}</strong>"
+            f"<p>{_esc(event['detail'] or 'local action')}</p>"
+            "</li>"
+        )
+    audit_html = (
+        "<ul class='control-audit-list'>" + "".join(audit_items) + "</ul>"
+        if audit_items
+        else "<p class='control-empty'>No local audit events yet.</p>"
+    )
+    return (
+        "<section class='control-deck'>"
+        "<div class='control-head'>"
+        "<div><span>privacy posture</span><h2>Control Deck</h2></div>"
+        f"<p>{_esc(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}</p>"
+        "</div>"
+        "<div class='control-grid'>"
+        + "".join(cards)
+        + "</div>"
+        "<section class='control-audit'>"
+        "<div><span>recent local actions</span><h3>Audit Trail</h3></div>"
+        + audit_html
+        + "</section>"
+        "</section>"
+    )
+
+
+def ui_control_check(db) -> str:
+    audit_event(db, "control_check", "Control deck refreshed")
+    return ui_control_deck(db)
+
+
 def ui_status_pulse(db) -> str:
     """Build the ambient status line HTML."""
     cur = db.cursor()
@@ -3677,6 +4788,8 @@ def ui_save_settings(db, new_name, new_address):
     if new_address.strip():
         set_setting(db, "user_address", new_address.strip())
         msgs.append(f"You shall be addressed as *{new_address.strip()}*.")
+    if msgs:
+        audit_event(db, "settings_update", "identity settings changed")
     return "\n".join(msgs) if msgs else "Nothing changed."
 
 
@@ -3689,6 +4802,11 @@ def ui_save_behavior(db, serious, sandbox, graph_inj):
     msgs.append(f"Serious mode: {'on' if serious else 'off'}")
     msgs.append(f"Sandbox mode: {'on' if sandbox else 'off'}")
     msgs.append(f"Graph injection: {graph_inj}")
+    audit_event(
+        db,
+        "behavior_update",
+        f"serious={bool(serious)} sandbox={bool(sandbox)} graph={graph_inj}",
+    )
     return "*Settings updated.* " + " · ".join(msgs)
 
 
@@ -3696,9 +4814,11 @@ def ui_save_categories(db, categories_str):
     """Save custom categories from comma-separated string."""
     if not categories_str.strip():
         set_setting(db, "custom_categories", "[]")
+        audit_event(db, "categories_update", "custom categories cleared")
         return "*Categories cleared.*"
     cats = [c.strip().upper() for c in categories_str.split(",") if c.strip()]
     set_setting(db, "custom_categories", json.dumps(cats))
+    audit_event(db, "categories_update", f"{len(cats)} custom category/categories")
     return f"*Custom categories set:* {', '.join(cats)}"
 
 
@@ -3710,6 +4830,7 @@ def ui_save_avatar(filepath):
         src = Path(filepath)
         shutil.copy2(str(src), str(AVATAR_PATH))
         log.info(f"Avatar saved: {AVATAR_PATH}")
+        audit_event(get_db(), "avatar_update", "familiar portrait changed")
         return "*Portrait saved.* Restart to see it in the header."
     except Exception as e:
         log.error(f"Avatar save failed: {e}")
@@ -3778,17 +4899,20 @@ def _get_avatar_src() -> str:
 def build_ui(db, index, metadata):
     with gr.Blocks(
         title=f"{get_setting(db, 'pet_name', 'Grimalkin')} — Your Private AI Familiar",
-        theme=_build_dark_theme(),
-        css=GRIM_CSS,
+        analytics_enabled=False,
     ) as demo:
         pet_name = get_setting(db, "pet_name", "Grimalkin")
+        pet_name_html = _esc(pet_name)
         _tier = BOND.tier_for(get_bond_level(db))
         _tier_lines = OPENING_LINES.get(_tier, OPENING_LINES["Acquaintance"])
         _opening = random.choice(_tier_lines)
 
         avatar_src = _get_avatar_src()
         if avatar_src:
-            avatar_html = f'<div class="grim-avatar"><img src="{avatar_src}" alt="{pet_name}"></div>'
+            avatar_html = (
+                f'<div class="grim-avatar"><img src="{_esc(avatar_src)}" '
+                f'alt="{pet_name_html}"></div>'
+            )
         else:
             avatar_html = '<div class="grim-avatar-empty">&#9676;</div>'
 
@@ -3799,21 +4923,24 @@ def build_ui(db, index, metadata):
         <div class="grim-header">
             <div class="grim-header-left">
                 <div class="name-row">
-                    <p class="familiar-name">{pet_name}</p>
+                    <p class="familiar-name">{pet_name_html}</p>
                     <span class="version-tag">v{VERSION}</span>
                 </div>
                 <div class="bond-row">
-                    <p class="bond-tier">{_tier}</p>
+                    <p class="bond-tier">{_esc(_tier)}</p>
                     <div class="bond-bar"><div class="bond-fill" style="width:{_bond_pct}%"></div></div>
                     <span class="bond-level">{_bond_level}</span>
                 </div>
-                <p class="opening-line">{_opening}</p>
+                <p class="opening-line">{_esc(_opening)}</p>
             </div>
-            {avatar_html}
+            <div class="grim-header-right">
+                {avatar_html}
+                {ui_header_panel(db)}
+            </div>
         </div>
         """)
 
-        gr.HTML(ui_status_pulse(db))
+        gr.HTML(ui_pulse_rail(db))
 
         # Scratch Post
         session_id = gr.State(str(uuid.uuid4()))
@@ -3830,6 +4957,37 @@ def build_ui(db, index, metadata):
                 [session_id, msg_input, chatbot],
                 [chatbot, msg_input],
             )
+            with gr.Group(elem_classes=["voice-dock"]):
+                with gr.Row(elem_classes=["voice-actions"]):
+                    voice_audio = gr.Audio(
+                        sources=["microphone"],
+                        type="filepath",
+                        label="Push-to-talk",
+                        show_label=False,
+                        format="wav",
+                        scale=5,
+                        min_width=220,
+                    )
+                    voice_btn = gr.Button(
+                        "Send Voice",
+                        variant="primary",
+                        size="sm",
+                        scale=1,
+                        min_width=118,
+                    )
+                voice_reply = gr.Audio(
+                    label="Reply Voice",
+                    type="filepath",
+                    autoplay=False,
+                    interactive=False,
+                    visible=False,
+                )
+                voice_status = gr.Markdown(elem_classes=["voice-status"])
+                voice_btn.click(
+                    partial(ui_voice_chat, db, index, metadata),
+                    [session_id, voice_audio, chatbot],
+                    [chatbot, voice_status, voice_reply],
+                )
 
             with gr.Accordion("Commands", open=False):
                 cmd_lines = [
@@ -3844,6 +5002,12 @@ def build_ui(db, index, metadata):
                     ]
                 )
                 gr.Markdown("\n\n".join(cmd_lines))
+
+        # Control Deck
+        with gr.Tab("🛡️ Control Deck"):
+            control_html = gr.HTML(ui_control_deck(db))
+            control_btn = gr.Button("Run Local Check", variant="primary")
+            control_btn.click(partial(ui_control_check, db), None, control_html)
 
         # Hunt
         with gr.Tab("🏹 The Hunt"):
@@ -4018,7 +5182,7 @@ def build_ui(db, index, metadata):
         gr.HTML("""
         <div class="grim-footer">
             <span class="footer-disclaimer">Grimalkin uses AI to generate responses. AI can make mistakes — always verify important information.</span>
-            <span class="footer-sig">100%% local &middot; your data never leaves this machine</span>
+            <span class="footer-sig">100% local &middot; your data never leaves this machine</span>
         </div>
         """)
 
@@ -4107,6 +5271,7 @@ def main():
     index, metadata = init_faiss()
 
     start_scheduler(index, metadata)
+    audit_event(db, "startup", f"host={host} port={args.port}")
 
     auth = _check_auth if CFG.auth_token else None
 
@@ -4118,6 +5283,11 @@ def main():
         share=False,
         allowed_paths=[str(APP_DIR)],
         auth=auth,
+        theme=_build_dark_theme(),
+        css=GRIM_CSS,
+        js=GRIM_JS,
+        enable_monitoring=False,
+        footer_links=[],
     )
 
 

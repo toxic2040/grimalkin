@@ -1,6 +1,6 @@
 """
-Grimalkin v5.0 — Core Engine
-=============================
+Grimalkin v5.0.1 — Core Engine
+===============================
 
 Everything that touches inference, retrieval, entities, or the knowledge graph.
 No UI. No commands. No Gradio. Pure logic.
@@ -40,7 +40,7 @@ log = logging.getLogger("grimalkin")
 # Constants
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-VERSION = "5.0"
+VERSION = "5.0.1"
 
 HUNTING_GROUNDS = Path.home() / "Downloads"
 

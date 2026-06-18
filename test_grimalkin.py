@@ -5,12 +5,17 @@ Grimalkin test harness — pure-logic tests, no Ollama or Gradio required.
 import hashlib
 import json
 import sqlite3
+import sys
 import tempfile
 from pathlib import Path
 
 import numpy as np
 
 from grimalkin import (
+    _command_status,
+    _strip_think_artifacts,
+    _with_no_think,
+    audit_event,
     build_chat_context,
     classify_file,
     file_hash,
@@ -21,6 +26,7 @@ from grimalkin import (
     save_chat_message,
     scrub_corporate,
     spring_layout,
+    ui_control_deck,
     EXTENSION_MAP,
 )
 
@@ -68,6 +74,14 @@ def make_test_db():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    db.execute("""
+        CREATE TABLE audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            event_type TEXT,
+            detail TEXT
+        )
+    """)
     return db
 
 
@@ -102,6 +116,53 @@ def test_scrub_case_insensitive():
     result = scrub_corporate(text)
     assert "absolutely" not in result.lower()
     assert "as an ai" not in result.lower()
+
+
+# ─── local control helpers ───────────────────────────────────────────────────
+
+def test_qwen3_no_think_added_once():
+    assert _with_no_think("hello", "qwen3:8b") == "hello\n/no_think"
+    assert _with_no_think("hello\n/no_think", "qwen3:8b") == "hello\n/no_think"
+    assert _with_no_think("hello", "llama3.2") == "hello"
+
+
+def test_qwen3_think_artifacts_are_stripped():
+    raw = "<think>hidden chain</think>\n\nVisible answer.\n/no_think"
+    assert _strip_think_artifacts(raw, "qwen3:8b") == "Visible answer."
+    assert _strip_think_artifacts(raw, "llama3.2") == raw
+
+
+def test_command_status_handles_missing_and_ready_commands():
+    missing_state, missing_detail, missing_class = _command_status("")
+    assert (missing_state, missing_detail, missing_class) == (
+        "missing",
+        "not configured",
+        "warn",
+    )
+    ready_state, ready_detail, ready_class = _command_status(f"{sys.executable} -V")
+    assert ready_state == "ready"
+    assert ready_detail == sys.executable
+    assert ready_class == "ok"
+
+
+def test_audit_event_records_metadata_only():
+    db = make_test_db()
+    audit_event(db, "control_check", "deck refreshed")
+    row = db.execute("SELECT event_type, detail FROM audit_log").fetchone()
+    assert row == ("control_check", "deck refreshed")
+
+
+def test_control_deck_escapes_audit_details():
+    db = make_test_db()
+    db.execute(
+        "INSERT INTO audit_log (event_type, detail) VALUES (?, ?)",
+        ("local", "<script>alert(1)</script>"),
+    )
+    db.commit()
+    html = ui_control_deck(db)
+    assert "Control Deck" in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "<script>alert(1)</script>" not in html
 
 
 # ─── file_hash ────────────────────────────────────────────────────────────────

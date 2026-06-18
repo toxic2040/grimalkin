@@ -1,6 +1,6 @@
 """
-Grimalkin v5.0 — Feature Bridge
-=================================
+Grimalkin v5.0.1 — Feature Bridge
+===================================
 
 Thin adapter between the v4.1 monolith (grimalkin.py) and the v5.0 component
 stack (grimalkin_core.py + grimalkin_interfaces.py).

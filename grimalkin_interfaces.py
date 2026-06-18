@@ -1,6 +1,6 @@
 """
-Grimalkin v5.0 — Interface Contracts
-=====================================
+Grimalkin v5.0.1 — Interface Contracts
+=======================================
 
 Drop-in abstraction layer for the v4.0 monolith.
 These protocols define the seams. Current implementations wrap existing code 1:1.
