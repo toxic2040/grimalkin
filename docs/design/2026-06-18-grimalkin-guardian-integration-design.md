@@ -128,19 +128,25 @@ Target layout after the fold-in (exact directory names finalized in Slice 1):
 
 ```
 grimalkin/                      # the public repo, MIT
-├── companion/                  # Python: Gradio UI, Ollama/Gemma, FAISS, KG, persona
-│   └── (today's grimalkin_*.py, refactored — see Slice 1)
+├── grimalkin.py, grimalkin_*.py, scripts/, …   # Python companion (stays at repo root)
 ├── guardian/                   # Rust workspace: the folded-in guardian
-│   ├── crates/...              # core, platform, runtime, linux, daemon, ipc, helper, ui
+│   ├── crates/…                # core, platform, runtime, linux, daemon, ipc, helper, ui
+│   ├── systemd/                # guardian units
 │   └── Cargo.toml
 ├── docs/                       # design specs (this file), operating guide
-├── systemd/                    # guardian units
 └── README.md                   # the two-part product
 ```
 
-The guardian arrives via `git subtree` merge so its history (the v0.1 spine, the
-red-team hardening pass, and the control-deck build) is preserved in grimalkin.
-The standalone guardian repo is retired as the dev origin after the merge.
+**Slice 1 adds `guardian/` only and leaves the Python companion at the repo root
+untouched.** Moving the companion into a `companion/` subdirectory would break the
+working app's import/launch/CI/pre-commit paths for no functional gain, so that
+reorg is a deferred, optional cosmetic step (later or never).
+
+The guardian is **squash-imported** (`git subtree add --squash`) so grimalkin's
+published history starts from a clean, MIT tree — it never carries the GPL/AGPL
+past. The full guardian development history (the v0.1 spine, the red-team
+hardening pass, the control-deck build) is retained in the original local
+repository as provenance, pointed to from `guardian/PROVENANCE.md`.
 
 ## 7. Naming and relicense
 
@@ -195,16 +201,21 @@ The fold-in must not weaken any guarantee the guardian already proved:
 Each slice is an independent spec → plan → implementation with a hard gate. The
 gate is a testable stop: the slice is not done until it passes.
 
-### Slice 1 — Fold-in & relicense (foundation, zero behavior change)
-- Relicense guardian crates AGPL → MIT (workspace `license`, headers/notices).
-- `git subtree`-merge the guardian into `grimalkin/guardian/`, preserving history.
-- Restructure to the §6 polyglot layout (companion under `companion/`).
-- Reconcile the build (Rust workspace under `guardian/`; companion unaffected).
-- Decide and apply the crate rename (`familiar-*` → `guardian-*`) if taken.
-- Rewrite the top-level README as the two-part product.
-- **Gate:** the tree is consistently MIT; the Rust guardian builds in its new home
-  (`cargo test` green) and the Python companion is unchanged and runs; guardian
-  history is present in grimalkin; **nothing is pushed.**
+### Slice 1 — Fold-in & relicense (foundation)
+- Remove the GPL-3.0 `rustables` dependency: do all nftables work via the `nft`
+  binary (parity-checked by the existing netns tests). This is the precondition
+  for a genuine MIT relicense.
+- Relicense the guardian crates AGPL → MIT (workspace `license` + MIT `LICENSE`).
+- Squash-import the cleaned guardian into `grimalkin/guardian/` (clean public
+  history; full dev history retained as provenance — §6).
+- Add `guardian/` at the repo root; the Python companion stays where it is (no
+  `companion/` move this slice).
+- Reconcile the build (Rust workspace under `guardian/`; `.gitignore`; pre-commit)
+  and rewrite the top-level README as the two-part product.
+- **Gate:** the guardian tree is consistently MIT with NO copyleft (no AGPL/GPL,
+  no `rustables`); the Rust guardian builds and tests green in its new home; the
+  Python companion is unchanged and its tests pass; **nothing is pushed.** (Crate
+  rename and the `/run/familiar` path rename are Slice 6.)
 
 ### Slice 2 — Gemma 4B as the default model (small, early)
 - Switch the companion default `qwen3:8b` → `gemma3:4b`; handle Gemma-family
@@ -278,8 +289,11 @@ gate is a testable stop: the slice is not done until it passes.
 - **Standalone egui deck (`familiar-ui`):** keep as an optional, minimal headless
   fallback (for running the guardian without grimalkin), not retired. grimalkin's
   Gradio deck becomes the primary control surface.
-- **Crate rename** `familiar-*` → `guardian-*`: decided/applied in Slice 1
-  (low-stakes, mechanical).
+- **Crate rename** `familiar-*` → `guardian-*`: **deferred to Slice 6 (packaging)**,
+  because it ripples into binary names, systemd units, scripts, and the
+  `/run/familiar` runtime paths — best done in one pass with packaging, not
+  half-done earlier. The crate names are internal; the product is "grimalkin /
+  the guardian" regardless.
 - **Socket/path naming:** `/run/familiar/*` paths reviewed for rename to a
   grimalkin-namespaced path during Slice 1/3.
 - **Persona voice for security events:** the tone for guardian narration (calm,
