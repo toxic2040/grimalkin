@@ -1,0 +1,15 @@
+[package]
+name = "familiar-linux"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+familiar-core.workspace = true
+familiar-platform.workspace = true
+nfq.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+thiserror.workspace = true

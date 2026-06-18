@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/familiar-core",
+    "crates/familiar-advisor",
+    "crates/familiar-platform",
+    "crates/familiar-runtime",
+    "crates/familiar-linux",
+    "crates/familiar-daemon",
+    "crates/familiar-fanotify-helper",
+    "crates/familiar-ipc",
+    "crates/familiar-ui",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+familiar-core = { path = "crates/familiar-core" }
+familiar-platform = { path = "crates/familiar-platform" }
+familiar-advisor = { path = "crates/familiar-advisor" }
+familiar-runtime = { path = "crates/familiar-runtime" }
+familiar-linux = { path = "crates/familiar-linux" }
+familiar-ipc = { path = "crates/familiar-ipc" }
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+proptest = "1"
+nfq = "0.2.5"
+libc = "0.2.186"
+rustix = { version = "0.38", features = ["net", "process"] }
+
