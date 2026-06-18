@@ -32,3 +32,6 @@ CLAU[D]E.md
 .clau[d]e/
 .wrangler/
 sbom.cdx.json
+
+# Rust guardian build output
+guardian/target/
