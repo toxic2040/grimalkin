@@ -2,6 +2,25 @@
 
 ---
 
+## v5.0.2 — Security Hardening
+
+### Security
+
+| Fix | Detail |
+|-----|--------|
+| Gradio file serving | Restricted `allowed_paths` and static paths to avatar image files instead of the whole app directory |
+| Non-loopback launch | Refuses network binds without `GRIM_AUTH_TOKEN`; warning now states the auth requirement |
+| Auth comparison | Uses constant-time token comparison |
+| Pyre/Loom HTML | Escapes attacker-controlled filenames and entity names in HTML-rendered surfaces |
+
+### Tests
+
+| Change | Detail |
+|--------|--------|
+| Security regression tests | Added coverage for file-serving scope, non-loopback auth enforcement, Pyre escaping, and Loom fallback escaping |
+
+---
+
 ## v5.0.1 — Privacy Control Deck
 
 ### New Features

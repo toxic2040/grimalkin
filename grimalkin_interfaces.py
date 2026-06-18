@@ -1,5 +1,5 @@
 """
-Grimalkin v5.0.1 — Interface Contracts
+Grimalkin v5.0.2 — Interface Contracts
 =======================================
 
 Drop-in abstraction layer for the v4.0 monolith.

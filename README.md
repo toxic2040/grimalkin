@@ -15,7 +15,9 @@
 
 Grimalkin is a local AI familiar that sorts your files, indexes them for instant Q&A, builds a knowledge graph of everything it finds, and develops a personality that sharpens the longer you spend together. No cloud, no API keys, no network tracking. One database, one bond, one cat.
 
-## Latest: v5.0.1
+## Latest: v5.0.2
+
+**Security hardening** narrows Gradio file serving to avatar assets only, requires `GRIM_AUTH_TOKEN` for non-loopback binds, and escapes attacker-controlled filenames/entity names in Pyre/Loom HTML surfaces.
 
 **Privacy Control Deck** shows the live local posture: Ollama endpoint, voice adapter readiness, plaintext memory footprint, metadata-only audit trail, file access mode, and git source state.
 

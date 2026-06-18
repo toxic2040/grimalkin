@@ -1,5 +1,5 @@
 """
-Grimalkin v5.0.1 — Core Engine
+Grimalkin v5.0.2 — Core Engine
 ===============================
 
 Everything that touches inference, retrieval, entities, or the knowledge graph.
@@ -13,6 +13,7 @@ Dependency flow: grimalkin.py → grimalkin_features.py → grimalkin_core.py �
 # ─── Imports ───────────────────────────────────────────────────────────────────
 
 import hashlib
+import html as html_lib
 import json
 import logging
 import re
@@ -40,7 +41,7 @@ log = logging.getLogger("grimalkin")
 # Constants
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-VERSION = "5.0.1"
+VERSION = "5.0.2"
 
 HUNTING_GROUNDS = Path.home() / "Downloads"
 
@@ -1038,8 +1039,15 @@ def build_loom_figure(db, filter_type: str = None, search_term: str = ""):
         }
         node_color = [color_map.get(n["type"], "#888") for n in nodes if n["id"] in pos]
         node_text = [n["id"] for n in nodes if n["id"] in pos]
-        node_hover = [f"{n['id']} ({n['type']}) — seen {int(n['size'] // 1.5)}x"
-                      for n in nodes if n["id"] in pos]
+        node_hover = [
+            (
+                f"{html_lib.escape(str(n['id']), quote=True)} "
+                f"({html_lib.escape(str(n['type']), quote=True)}) — "
+                f"seen {int(n['size'] // 1.5)}x"
+            )
+            for n in nodes
+            if n["id"] in pos
+        ]
 
         fig = go.Figure()
         fig.add_trace(go.Scatter(
@@ -1069,7 +1077,9 @@ def build_loom_figure(db, filter_type: str = None, search_term: str = ""):
     # HTML fallback
     html = "<div style='padding:20px;font-family:monospace'><h3>The Loom (static view)</h3><ul>"
     for n in nodes[:30]:
-        html += f"<li><b>{n['id']}</b> ({n['type']}) — {int(n['size'] // 1.5)}x</li>"
+        node_id = html_lib.escape(str(n["id"]), quote=True)
+        node_type = html_lib.escape(str(n["type"]), quote=True)
+        html += f"<li><b>{node_id}</b> ({node_type}) — {int(n['size'] // 1.5)}x</li>"
     html += "</ul>"
     if len(nodes) > 30:
         html += f"<p>...and {len(nodes) - 30} more threads.</p>"

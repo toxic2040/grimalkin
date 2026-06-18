@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Grimalkin v5.0.1 — Privacy Control Deck
+Grimalkin v5.0.2 — Security Hardening
 =========================================
 
 A 100% local AI file-sorting familiar with persistent memory, FAISS-powered
@@ -20,6 +20,7 @@ Repo: https://github.com/toxic2040/grimalkin
 import argparse
 import calendar
 import hashlib
+import hmac
 import html
 import importlib.util
 import json
@@ -43,6 +44,7 @@ from datetime import datetime, timezone, date
 from functools import partial
 from pathlib import Path
 from threading import Thread
+from ipaddress import ip_address
 from urllib.parse import urlparse
 
 # ─── Dependency Pre-flight ─────────────────────────────────────────────────────
@@ -98,7 +100,7 @@ except ImportError:
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
 
-VERSION = "5.0.1"
+VERSION = "5.0.2"
 APP_DIR = Path(__file__).resolve().parent
 VAULT_DIR = APP_DIR / "vault"
 SORTED_BASE = APP_DIR / "sorted"
@@ -2293,7 +2295,7 @@ def build_loom_figure(db, filter_type: str = None, search_term: str = ""):
                 textposition="top center",
                 textfont=dict(size=9, color="#8899aa"),
                 hovertext=[
-                    f"<b>{n['id']}</b><br>{n['type']}<br>seen {int(n['size'] // 1.5)}×"
+                    f"<b>{_esc(n['id'])}</b><br>{_esc(n['type'])}<br>seen {int(n['size'] // 1.5)}×"
                     for n in visible_nodes
                 ],
                 hoverinfo="text",
@@ -2327,7 +2329,9 @@ def build_loom_figure(db, filter_type: str = None, search_term: str = ""):
     # HTML fallback
     html = "<div style='padding:20px;font-family:monospace'><h3>The Loom (static view)</h3><ul>"
     for n in nodes[:30]:
-        html += f"<li><b>{n['id']}</b> ({n['type']}) — {n['size'] // 1.5}×</li>"
+        node_id = _esc(n["id"])
+        node_type = _esc(n["type"])
+        html += f"<li><b>{node_id}</b> ({node_type}) — {n['size'] // 1.5}×</li>"
     html += "</ul>"
     if len(nodes) > 30:
         html += f"<p>…and {len(nodes) - 30} more threads.</p>"
@@ -4117,8 +4121,12 @@ def ui_pyre_row_select(evt: gr.SelectData, df_state):
     try:
         idx = evt.index[0]
         sel = df_state[idx]
-        html = f"<div class='pyre-container'><div class='flames'>🔥</div><div class='filename-burn'>{sel['filename']}</div></div>"
-        return html, sel["file_hash"]
+        filename = _esc(sel["filename"])
+        preview = (
+            "<div class='pyre-container'><div class='flames'>🔥</div>"
+            f"<div class='filename-burn'>{filename}</div></div>"
+        )
+        return preview, sel["file_hash"]
     except Exception as e:
         log.warning(f"Pyre row select failed: {e}")
         return "<div class='pyre-container'><div class='flames'>🔥</div></div>", ""
@@ -4949,6 +4957,11 @@ AVATAR_PATH = APP_DIR / "grimalkin_avatar.jpg"
 AVATAR_FALLBACK = APP_DIR / "grimalkin.jpg"
 
 
+def _gradio_file_paths() -> list[str]:
+    """Return the only app-local files Gradio may serve directly."""
+    return [str(AVATAR_PATH), str(AVATAR_FALLBACK)]
+
+
 def _get_avatar_src() -> str:
     """Return the Gradio file-serving URL for the avatar, or empty string."""
     if AVATAR_PATH.exists():
@@ -5291,7 +5304,26 @@ def _check_auth(username: str, password: str) -> bool:
     expected = CFG.auth_token
     if not expected:
         return True
-    return password == expected
+    return hmac.compare_digest(password or "", expected)
+
+
+def _is_loopback_host(host: str) -> bool:
+    normalized = (host or "").strip().lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_launch_security(host: str):
+    if _is_loopback_host(host) or CFG.auth_token:
+        return
+    raise SystemExit(
+        "Refusing non-loopback launch without GRIM_AUTH_TOKEN. "
+        "Set GRIM_AUTH_TOKEN or bind to 127.0.0.1."
+    )
 
 
 # ─── Main ──────────────────────────────────────────────────────────────────────
@@ -5315,13 +5347,14 @@ def main():
     args = parser.parse_args()
 
     host = args.host
-    if host not in ("127.0.0.1", "localhost", "::1") and not host.startswith("127."):
+    _validate_launch_security(host)
+    if not _is_loopback_host(host):
         print(
             "\n"
             "  *** WARNING: non-loopback bind address ***\n"
             f"  Binding to {host} — the server will be reachable on the network.\n"
-            "  Ensure a reverse proxy with TLS termination is in front of this\n"
-            "  service before exposing it to untrusted clients.\n",
+            "  GRIM_AUTH_TOKEN is required; use a reverse proxy with TLS\n"
+            "  termination before exposing it to untrusted clients.\n",
             file=sys.stderr,
         )
 
@@ -5337,13 +5370,14 @@ def main():
 
     auth = _check_auth if CFG.auth_token else None
 
-    gr.set_static_paths(paths=[str(APP_DIR)])
+    gradio_file_paths = _gradio_file_paths()
+    gr.set_static_paths(paths=gradio_file_paths)
     demo = build_ui(db, index, metadata)
     demo.launch(
         server_name=host,
         server_port=args.port,
         share=False,
-        allowed_paths=[str(APP_DIR)],
+        allowed_paths=gradio_file_paths,
         auth=auth,
         theme=_build_dark_theme(),
         css=GRIM_CSS,

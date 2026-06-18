@@ -9,13 +9,20 @@ import sqlite3
 import sys
 import tempfile
 import wave
+from dataclasses import replace
 from pathlib import Path
 
+import grimalkin
+import grimalkin_core
 import numpy as np
 
 from grimalkin import (
+    _check_auth,
     _command_status,
+    _gradio_file_paths,
+    _is_loopback_host,
     _strip_think_artifacts,
+    _validate_launch_security,
     _voice_template_values,
     _with_no_think,
     audit_event,
@@ -29,6 +36,7 @@ from grimalkin import (
     save_chat_message,
     scrub_corporate,
     spring_layout,
+    ui_pyre_row_select,
     ui_control_deck,
     EXTENSION_MAP,
 )
@@ -83,6 +91,30 @@ def make_test_db():
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             event_type TEXT,
             detail TEXT
+        )
+    """)
+    return db
+
+
+def make_graph_db():
+    """Create an in-memory DB with enough graph tables for Loom tests."""
+    db = sqlite3.connect(":memory:")
+    db.execute("""
+        CREATE TABLE entities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            type TEXT,
+            times_seen INTEGER DEFAULT 1,
+            importance INTEGER DEFAULT 0
+        )
+    """)
+    db.execute("""
+        CREATE TABLE relationships (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id INTEGER,
+            target_id INTEGER,
+            relation_type TEXT,
+            source_file TEXT
         )
     """)
     return db
@@ -215,6 +247,93 @@ def test_voice_adapter_marker_tts_writes_wav():
         with wave.open(str(out_path), "rb") as wav:
             assert wav.getnchannels() == 1
             assert wav.getframerate() == 16000
+
+
+def test_gradio_file_paths_only_allow_avatar_files():
+    paths = _gradio_file_paths()
+    assert str(grimalkin.AVATAR_PATH) in paths
+    assert str(grimalkin.AVATAR_FALLBACK) in paths
+    assert str(grimalkin.APP_DIR) not in paths
+
+
+def test_auth_uses_token_when_configured():
+    old_cfg = grimalkin.CFG
+    try:
+        grimalkin.CFG = replace(old_cfg, auth_token="secret-token")
+        assert _check_auth("ignored", "secret-token") is True
+        assert _check_auth("ignored", "wrong-token") is False
+        assert _check_auth("ignored", None) is False
+    finally:
+        grimalkin.CFG = old_cfg
+
+
+def test_non_loopback_launch_requires_auth_token():
+    old_cfg = grimalkin.CFG
+    try:
+        grimalkin.CFG = replace(old_cfg, auth_token="")
+        assert _is_loopback_host("127.0.0.1") is True
+        assert _is_loopback_host("::1") is True
+        assert _is_loopback_host("0.0.0.0") is False
+        try:
+            _validate_launch_security("0.0.0.0")
+        except SystemExit as exc:
+            assert "GRIM_AUTH_TOKEN" in str(exc)
+        else:
+            raise AssertionError("non-loopback launch without auth token did not fail")
+
+        grimalkin.CFG = replace(old_cfg, auth_token="secret-token")
+        _validate_launch_security("0.0.0.0")
+    finally:
+        grimalkin.CFG = old_cfg
+
+
+def test_pyre_row_select_escapes_filename():
+    class Event:
+        index = [0]
+
+    rows = [{"filename": '<img src=x onerror="alert(1)">.pdf', "file_hash": "abc"}]
+    preview, file_hash_value = ui_pyre_row_select(Event(), rows)
+    assert file_hash_value == "abc"
+    assert "<img src=x" not in preview
+    assert "&lt;img src=x" in preview
+
+
+def test_loom_html_fallback_escapes_entities():
+    db = make_graph_db()
+    db.execute(
+        "INSERT INTO entities (name, type, times_seen, importance) VALUES (?, ?, ?, ?)",
+        ('<img src=x onerror="alert(1)">', 'topic<script>', 3, 0),
+    )
+    db.commit()
+    old_plotly = grimalkin.HAS_PLOTLY
+    try:
+        grimalkin.HAS_PLOTLY = False
+        html = grimalkin.build_loom_figure(db)
+    finally:
+        grimalkin.HAS_PLOTLY = old_plotly
+    assert "<img src=x" not in html
+    assert "topic<script>" not in html
+    assert "&lt;img src=x" in html
+    assert "topic&lt;script&gt;" in html
+
+
+def test_core_loom_html_fallback_escapes_entities():
+    db = make_graph_db()
+    db.execute(
+        "INSERT INTO entities (name, type, times_seen, importance) VALUES (?, ?, ?, ?)",
+        ('<svg onload="alert(1)">', 'person<script>', 2, 0),
+    )
+    db.commit()
+    old_plotly = grimalkin_core.HAS_PLOTLY
+    try:
+        grimalkin_core.HAS_PLOTLY = False
+        html = grimalkin_core.build_loom_figure(db)
+    finally:
+        grimalkin_core.HAS_PLOTLY = old_plotly
+    assert "<svg" not in html
+    assert "person<script>" not in html
+    assert "&lt;svg" in html
+    assert "person&lt;script&gt;" in html
 
 
 # ─── file_hash ────────────────────────────────────────────────────────────────
