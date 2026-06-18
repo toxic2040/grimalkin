@@ -76,18 +76,23 @@ Open **http://localhost:7860** in your browser. The cat is waiting.
 
 ### Optional: local voice adapters
 
-The Scratch Post voice dock is disabled until local command templates are set. Grimalkin does not ship cloud STT/TTS bindings.
+The Scratch Post voice dock is disabled until local command templates are set. Grimalkin does not ship cloud STT/TTS bindings. The repo includes a small local adapter at `scripts/grim_voice.py`; it detects Whisper/Vosk for STT and Piper/espeak/flite/spd-say for TTS.
 
 ```bash
-# STT receives {audio}; write transcript text to {out} or stdout.
-export GRIM_STT_COMMAND='whisper-cli {audio} --output-txt {out}'
+# STT receives {audio}; transcript text is written to {out}.
+export GRIM_STT_COMMAND='"{python}" "{app}/scripts/grim_voice.py" stt --audio "{audio}" --out "{out}"'
 
-# TTS receives response text on stdin unless {text} or {text_file} is used;
-# write playable audio to {out}.
-export GRIM_TTS_COMMAND='piper --model /path/to/voice.onnx --output_file {out}'
+# TTS receives response text through {text_file}; playable audio is written to {out}.
+export GRIM_TTS_COMMAND='"{python}" "{app}/scripts/grim_voice.py" tts --text-file "{text_file}" --out "{out}"'
 
 # Default false: discard browser microphone temp files after transcription.
 export GRIM_KEEP_VOICE_AUDIO=false
+
+# Optional engine/model overrides:
+export GRIM_STT_ENGINE=auto
+export GRIM_TTS_ENGINE=auto
+export GRIM_WHISPER_MODEL=base
+export GRIM_PIPER_MODEL=/path/to/piper-voice.onnx
 ```
 
 ## Scratch Post Commands
@@ -143,6 +148,7 @@ grimalkin/
 ├── grimalkin_core.py         # Engine — config, DB, bond, persona, search
 ├── grimalkin_features.py     # Feature handlers — hunt, groom, pyre, mirror
 ├── grimalkin_interfaces.py   # Gradio UI builder
+├── scripts/grim_voice.py     # Local STT/TTS command adapter
 ├── test_grimalkin.py         # Test suite
 ├── grimalkin.jpg             # Hero image
 ├── grimalkin_avatar.jpg      # Avatar / social icon

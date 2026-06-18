@@ -4,9 +4,11 @@ Grimalkin test harness — pure-logic tests, no Ollama or Gradio required.
 
 import hashlib
 import json
+import subprocess
 import sqlite3
 import sys
 import tempfile
+import wave
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +16,7 @@ import numpy as np
 from grimalkin import (
     _command_status,
     _strip_think_artifacts,
+    _voice_template_values,
     _with_no_think,
     audit_event,
     build_chat_context,
@@ -145,6 +148,15 @@ def test_command_status_handles_missing_and_ready_commands():
     assert ready_class == "ok"
 
 
+def test_command_status_expands_voice_template_placeholders():
+    values = _voice_template_values(audio="", out="", text_file="", text="")
+    command = '"{python}" "{app}/scripts/grim_voice.py" status --json'
+    state, detail, css_class = _command_status(command)
+    assert state == "ready"
+    assert detail == values["python"]
+    assert css_class == "ok"
+
+
 def test_audit_event_records_metadata_only():
     db = make_test_db()
     audit_event(db, "control_check", "deck refreshed")
@@ -163,6 +175,46 @@ def test_control_deck_escapes_audit_details():
     assert "Control Deck" in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
     assert "<script>alert(1)</script>" not in html
+
+
+def test_voice_adapter_status_returns_json():
+    script = Path(__file__).parent / "scripts" / "grim_voice.py"
+    proc = subprocess.run(
+        [sys.executable, str(script), "status", "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0
+    status = json.loads(proc.stdout)
+    assert "stt" in status
+    assert "tts" in status
+
+
+def test_voice_adapter_marker_tts_writes_wav():
+    script = Path(__file__).parent / "scripts" / "grim_voice.py"
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = Path(tmp) / "reply.wav"
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "tts",
+                "--engine",
+                "marker",
+                "--text",
+                "local test",
+                "--out",
+                str(out_path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
+        with wave.open(str(out_path), "rb") as wav:
+            assert wav.getnchannels() == 1
+            assert wav.getframerate() == 16000
 
 
 # ─── file_hash ────────────────────────────────────────────────────────────────

@@ -10,6 +10,7 @@
 |---------|-------------|
 | **🛡️ Control Deck** | Live local posture cards for network endpoint, voice adapters, memory store, audit trail, file access, and source state |
 | **Push-to-talk hooks** | Optional local STT/TTS command templates with default microphone temp-file cleanup |
+| **Local voice adapter** | Repo-local command wrapper for Whisper/Vosk STT and Piper/espeak/flite/spd-say TTS |
 | **Metadata audit trail** | Local action metadata is recorded without prompts, transcripts, or file contents |
 | **Qwen3 no-think handling** | Appends `/no_think` for Qwen3 models and strips visible think artifacts from responses |
 
@@ -18,7 +19,7 @@
 | Change | Detail |
 |--------|--------|
 | Voice adapter docs | README and `.env.example` document `GRIM_STT_COMMAND`, `GRIM_TTS_COMMAND`, and `GRIM_KEEP_VOICE_AUDIO` |
-| Control helper tests | Added pure tests for no-think handling, command status, audit writes, and HTML escaping |
+| Control helper tests | Added tests for no-think handling, command status, audit writes, HTML escaping, and the local voice adapter |
 
 ---
 

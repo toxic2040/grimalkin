@@ -112,6 +112,24 @@ log = logging.getLogger("grimalkin")
 _COERCE = {bool: lambda s: s.lower() in ("1", "true", "yes"), Path: Path}
 
 
+def _load_env_file(path: Path):
+    """Load simple KEY=VALUE pairs without overriding real environment values."""
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key or key.startswith("#"):
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
 @dataclass(frozen=True)
 class GrimConfig:
     ollama_model: str = "local-chat-model"
@@ -146,6 +164,7 @@ class GrimConfig:
         return cls(**overrides)
 
 
+_load_env_file(APP_DIR / ".env")
 CFG = GrimConfig.from_env()
 
 # ─── File Categories ───────────────────────────────────────────────────────────
@@ -4189,7 +4208,11 @@ VOICE_TMP_DIR = Path(tempfile.gettempdir()) / "grimalkin_voice"
 
 
 def _voice_template_values(**extra) -> dict[str, str]:
-    values = {"tmp": str(VOICE_TMP_DIR)}
+    values = {
+        "app": str(APP_DIR),
+        "python": sys.executable,
+        "tmp": str(VOICE_TMP_DIR),
+    }
     values.update({k: str(v) for k, v in extra.items()})
     return values
 
@@ -4556,14 +4579,51 @@ def _command_status(command: str) -> tuple[str, str, str]:
     if not command:
         return "missing", "not configured", "warn"
     try:
-        exe = shlex.split(command)[0]
-    except ValueError as e:
+        values = _voice_template_values(audio="", out="", text="", text_file="")
+        parts = [part.format(**values) for part in shlex.split(command)]
+        exe = parts[0]
+    except (KeyError, ValueError) as e:
         return "invalid", _clip(e, 80), "bad"
     exe_path = Path(exe).expanduser()
     found = exe_path.exists() if exe_path.parent != Path(".") else shutil.which(exe)
     if found:
         return "ready", exe, "ok"
     return "missing", f"{exe} not on PATH", "warn"
+
+
+def _adapter_engine_status(mode: str) -> tuple[str, str, str]:
+    script = APP_DIR / "scripts" / "grim_voice.py"
+    if not script.exists():
+        return "missing", "adapter script missing", "warn"
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(script), "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=4,
+            check=False,
+        )
+        if proc.returncode != 0:
+            detail = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+            return "unknown", _clip(detail, 120), "warn"
+        status = json.loads(proc.stdout)
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
+        return "unknown", _clip(e, 120), "warn"
+    engines = status.get(mode, [])
+    available = [item["engine"] for item in engines if item.get("available")]
+    if available:
+        return "ready", ", ".join(available[:3]), "ok"
+    return "missing-engine", f"no local {mode.upper()} engine found", "warn"
+
+
+def _voice_command_status(command: str, mode: str) -> tuple[str, str, str]:
+    state, detail, css_class = _command_status(command)
+    if css_class != "ok" or "grim_voice.py" not in command:
+        return state, detail, css_class
+    engine_state, engine_detail, engine_class = _adapter_engine_status(mode)
+    if engine_class == "ok":
+        return state, f"adapter ready; {engine_detail}", "ok"
+    return engine_state, f"adapter ready; {engine_detail}", engine_class
 
 
 def _is_loopback_url(url: str) -> bool:
@@ -4646,11 +4706,13 @@ def _control_card(title: str, value: str, detail: str, state: str) -> str:
 
 def ui_control_deck(db) -> str:
     """Render the privacy posture control deck."""
-    stt_state, stt_detail, stt_class = _command_status(
-        CFG.stt_command or os.environ.get("GRIM_STT_COMMAND", "")
+    stt_state, stt_detail, stt_class = _voice_command_status(
+        CFG.stt_command or os.environ.get("GRIM_STT_COMMAND", ""),
+        "stt",
     )
-    tts_state, tts_detail, tts_class = _command_status(
-        CFG.tts_command or os.environ.get("GRIM_TTS_COMMAND", "")
+    tts_state, tts_detail, tts_class = _voice_command_status(
+        CFG.tts_command or os.environ.get("GRIM_TTS_COMMAND", ""),
+        "tts",
     )
     voice_class = "ok" if stt_class == "ok" and tts_class == "ok" else "warn"
     voice_value = "ready" if voice_class == "ok" else "partial"
