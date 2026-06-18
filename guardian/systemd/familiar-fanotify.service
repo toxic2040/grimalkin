@@ -1,0 +1,21 @@
+[Unit]
+Description=Familiar file-read sensor (privileged, minimal)
+Before=familiar-daemon.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/familiar-fanotify-helper /run/familiar/fileread.sock /home /etc/shadow
+# The one broad cap, isolated to this tiny binary.
+AmbientCapabilities=CAP_SYS_ADMIN
+CapabilityBoundingSet=CAP_SYS_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run/familiar
+# The privileged helper can reach only the local daemon socket, never the network.
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

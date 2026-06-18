@@ -1,0 +1,31 @@
+[Unit]
+Description=Familiar guardian daemon (network containment)
+After=network.target familiar-fanotify.service
+Wants=familiar-fanotify.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/familiar-daemon /etc/familiar/config.json
+# Least privilege: only the cap the block actuator needs.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+# Harden the filesystem; keep state + the helper socket writable.
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/familiar /run/familiar
+RuntimeDirectory=familiar
+StateDirectory=familiar
+PrivateTmp=yes
+ProtectKernelTunables=yes
+# Delegate a writable cgroup subtree for the freezer (needs ProtectControlGroups off).
+ProtectControlGroups=no
+Delegate=yes
+# Permit the helper socket (AF_UNIX) and nftables/NFQUEUE (AF_NETLINK) only.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+# The daemon must not egress on its own; it only manipulates the firewall.
+IPAddressDeny=any
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

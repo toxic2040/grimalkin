@@ -1,0 +1,16 @@
+[package]
+name = "familiar-fanotify-helper"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "familiar-fanotify-helper"
+path = "src/main.rs"
+
+[dependencies]
+libc.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true

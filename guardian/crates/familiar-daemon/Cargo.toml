@@ -1,0 +1,27 @@
+[package]
+name = "familiar-daemon"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "familiar_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "familiar-daemon"
+path = "src/main.rs"
+
+[dependencies]
+familiar-core.workspace = true
+familiar-runtime.workspace = true
+familiar-advisor.workspace = true
+familiar-platform.workspace = true
+familiar-linux.workspace = true
+familiar-ipc.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+thiserror.workspace = true
+rustix.workspace = true
