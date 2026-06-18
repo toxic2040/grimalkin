@@ -40,26 +40,27 @@ log = logging.getLogger("grimalkin")
 # Configuration — replaces module-level constants
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
 @dataclass
 class GrimalkinConfig:
     """Single source of truth for all tunables. Swap models at runtime."""
 
     # Models
-    main_model: str = "qwen3:8b"           # GPU primary — swap to 14B Q5 when ready
-    router_model: str = ""                  # CPU routing — empty = no router yet
-    embed_model: str = "nomic-embed-text"   # CPU embeddings via Ollama
+    main_model: str = "qwen3:8b"  # GPU primary — swap to 14B Q5 when ready
+    router_model: str = ""  # CPU routing — empty = no router yet
+    embed_model: str = "nomic-embed-text"  # CPU embeddings via Ollama
 
     # Inference backend
     ollama_url: str = "http://localhost:11434"
     inference_timeout: int = 120
-    gpu_layers: int = 99                    # -ngl for llama.cpp / Ollama
+    gpu_layers: int = 99  # -ngl for llama.cpp / Ollama
 
     # Memory / FAISS
     faiss_dim: int = 768
     chunk_size: int = 800
     chunk_overlap: int = 100
-    max_vectors: int = 120_000              # prune threshold (future)
-    max_persona_tokens: int = 512           # cap on persona system prompt
+    max_vectors: int = 120_000  # prune threshold (future)
+    max_persona_tokens: int = 512  # cap on persona system prompt
 
     # Paths
     app_dir: Path = field(default_factory=lambda: Path(__file__).parent)
@@ -80,6 +81,7 @@ class GrimalkinConfig:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # LLM Backend Protocol
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 class LLMBackend(ABC):
     """
@@ -122,6 +124,7 @@ class LLMBackend(ABC):
 # LLM Backend: Ollama (wraps your current code exactly)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
 class OllamaBackend(LLMBackend):
     """
     1:1 wrap of existing ollama_chat + OllamaEmbeddings.
@@ -134,6 +137,7 @@ class OllamaBackend(LLMBackend):
 
         # Lazy import to match current pattern
         from langchain_community.embeddings import OllamaEmbeddings
+
         self._embeddings = OllamaEmbeddings(
             model=config.embed_model,
             base_url=config.ollama_url,
@@ -173,6 +177,7 @@ class OllamaBackend(LLMBackend):
 # LLM Backend: ROCm llama.cpp (future — skeleton only)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
 class ROCmBackend(LLMBackend):
     """
     Future: llama.cpp server with HIP on RX 7900 GRE.
@@ -188,6 +193,7 @@ class ROCmBackend(LLMBackend):
         self._gpu_lock = threading.Lock()
         # Embeddings still via Ollama on CPU — no reason to waste GPU
         from langchain_community.embeddings import OllamaEmbeddings
+
         self._embeddings = OllamaEmbeddings(
             model=config.embed_model,
             base_url=config.ollama_url,
@@ -226,9 +232,11 @@ class ROCmBackend(LLMBackend):
 # Memory Store Protocol
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
 @dataclass
 class ChunkRecord:
     """What goes into and comes out of the vector store."""
+
     text: str
     filename: str
     source_path: str
@@ -281,6 +289,7 @@ class MemoryStore(ABC):
 # Memory Store: Hardened FAISS (Path 1 — wraps current code + fixes)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
 class FaissMemoryStore(MemoryStore):
     """
     Wraps existing FAISS code with three fixes:
@@ -316,8 +325,10 @@ class FaissMemoryStore(MemoryStore):
             self._metadata = []
             self._next_id = 0
 
-        log.info(f"MemoryStore loaded: {self._index.ntotal} vectors, "
-                 f"{len(self._metadata)} metadata entries")
+        log.info(
+            f"MemoryStore loaded: {self._index.ntotal} vectors, "
+            f"{len(self._metadata)} metadata entries"
+        )
 
     def add_chunks(self, chunks: list, file_hash: str) -> int:
         """
@@ -347,13 +358,15 @@ class FaissMemoryStore(MemoryStore):
             self._index.add_with_ids(vecs, ids)
 
             for i, chunk in enumerate(chunks):
-                self._metadata.append({
-                    "vector_id": int(ids[i]),
-                    "filename": chunk.metadata.get("filename", ""),
-                    "source_path": chunk.metadata.get("source_path", ""),
-                    "text": chunk.page_content[:500],
-                    "file_hash": file_hash,
-                })
+                self._metadata.append(
+                    {
+                        "vector_id": int(ids[i]),
+                        "filename": chunk.metadata.get("filename", ""),
+                        "source_path": chunk.metadata.get("source_path", ""),
+                        "text": chunk.page_content[:500],
+                        "file_hash": file_hash,
+                    }
+                )
 
             self._next_id += len(chunks)
 
@@ -367,9 +380,9 @@ class FaissMemoryStore(MemoryStore):
             return []
 
         try:
-            vec = np.array(
-                self._llm.embed_query(query), dtype=np.float32
-            ).reshape(1, -1)
+            vec = np.array(self._llm.embed_query(query), dtype=np.float32).reshape(
+                1, -1
+            )
         except Exception as e:
             log.error(f"Query embedding failed: {e}")
             return []
@@ -379,8 +392,7 @@ class FaissMemoryStore(MemoryStore):
             distances, indices = self._index.search(vec, k_actual)
 
             # Build ID → metadata lookup for safe access
-            id_to_meta = {m["vector_id"]: m for m in self._metadata
-                          if "vector_id" in m}
+            id_to_meta = {m["vector_id"]: m for m in self._metadata if "vector_id" in m}
 
             results = []
             for dist, idx in zip(distances[0], indices[0]):
@@ -389,14 +401,16 @@ class FaissMemoryStore(MemoryStore):
                 meta = id_to_meta.get(int(idx))
                 if not meta:
                     continue
-                results.append(ChunkRecord(
-                    text=meta.get("text", ""),
-                    filename=meta.get("filename", ""),
-                    source_path=meta.get("source_path", ""),
-                    file_hash=meta.get("file_hash", ""),
-                    score=float(dist),
-                    vector_id=int(idx),
-                ))
+                results.append(
+                    ChunkRecord(
+                        text=meta.get("text", ""),
+                        filename=meta.get("filename", ""),
+                        source_path=meta.get("source_path", ""),
+                        file_hash=meta.get("file_hash", ""),
+                        score=float(dist),
+                        vector_id=int(idx),
+                    )
+                )
 
         return results
 
@@ -409,7 +423,8 @@ class FaissMemoryStore(MemoryStore):
 
         with self._lock:
             to_remove = [
-                m["vector_id"] for m in self._metadata
+                m["vector_id"]
+                for m in self._metadata
                 if m.get("file_hash") == file_hash and "vector_id" in m
             ]
             if not to_remove:
@@ -417,8 +432,7 @@ class FaissMemoryStore(MemoryStore):
 
             self._index.remove_ids(np.array(to_remove, dtype=np.int64))
             self._metadata = [
-                m for m in self._metadata
-                if m.get("file_hash") != file_hash
+                m for m in self._metadata if m.get("file_hash") != file_hash
             ]
 
         self.save()
@@ -443,6 +457,7 @@ class FaissMemoryStore(MemoryStore):
 # Memory Store: ChromaDB (future — skeleton)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
 class ChromaMemoryStore(MemoryStore):
     """
     Future drop-in when vault exceeds ~10k chunks.
@@ -457,25 +472,30 @@ class ChromaMemoryStore(MemoryStore):
         # from langchain_community.vectorstores import Chroma
         raise NotImplementedError("Enable when ready: pip install chromadb")
 
-    def add_chunks(self, chunks: list, file_hash: str) -> int:
-        ...  # chroma.add_documents(docs)
+    def add_chunks(
+        self, chunks: list, file_hash: str
+    ) -> int: ...  # chroma.add_documents(docs)
 
-    def search(self, query: str, k: int = 5) -> list[ChunkRecord]:
-        ...  # chroma.similarity_search(query, k=k, filter={"burned_at": None})
+    def search(
+        self, query: str, k: int = 5
+    ) -> list[
+        ChunkRecord
+    ]: ...  # chroma.similarity_search(query, k=k, filter={"burned_at": None})
 
-    def remove_file(self, file_hash: str) -> int:
-        ...  # chroma.delete(filter={"file_hash": file_hash})
+    def remove_file(
+        self, file_hash: str
+    ) -> int: ...  # chroma.delete(filter={"file_hash": file_hash})
 
     def save(self) -> None:
         pass  # ChromaDB auto-persists
 
-    def total_vectors(self) -> int:
-        ...  # return chroma._collection.count()
+    def total_vectors(self) -> int: ...  # return chroma._collection.count()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Feedback Store — the learning mechanism
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 class FeedbackStore:
     """
@@ -525,7 +545,9 @@ class FeedbackStore:
         self.db.commit()
         log.info(f"Correction recorded for task_type={task_type}")
 
-    def get_relevant(self, task_type: str, query: str = "", limit: int = 3) -> list[dict]:
+    def get_relevant(
+        self, task_type: str, query: str = "", limit: int = 3
+    ) -> list[dict]:
         """
         Retrieve past corrections relevant to current task.
         Inject these into the system prompt so the model doesn't repeat mistakes.
@@ -555,14 +577,17 @@ class FeedbackStore:
 
         lines = ["Past corrections to remember:"]
         for r in relevant:
-            lines.append(f"- When asked about '{r['query']}', "
-                         f"the correct answer was: {r['correction']}")
+            lines.append(
+                f"- When asked about '{r['query']}', "
+                f"the correct answer was: {r['correction']}"
+            )
         return "\n".join(lines)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Application Context — the v5.0 startup bundle
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 @dataclass
 class AppContext:
@@ -578,7 +603,7 @@ class AppContext:
         ctx = make_context(backend="rocm")         # future: ROCm backend
     """
 
-    db: Any                 # sqlite3.Connection — shared across threads (WAL mode)
+    db: Any  # sqlite3.Connection — shared across threads (WAL mode)
     config: GrimalkinConfig
     llm: LLMBackend
     memory: MemoryStore
@@ -588,6 +613,7 @@ class AppContext:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # How it all wires together — updated main()
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 def example_main():
     """

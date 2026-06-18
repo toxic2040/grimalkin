@@ -26,11 +26,17 @@ import numpy as np
 from numpy.linalg import norm
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import (
-    PyPDFLoader, TextLoader, UnstructuredWordDocumentLoader, CSVLoader,
+    PyPDFLoader,
+    TextLoader,
+    UnstructuredWordDocumentLoader,
+    CSVLoader,
 )
 
 from grimalkin_interfaces import (
-    GrimalkinConfig, AppContext, LLMBackend, ChunkRecord,
+    GrimalkinConfig,
+    AppContext,
+    LLMBackend,
+    ChunkRecord,
 )
 
 log = logging.getLogger("grimalkin")
@@ -47,18 +53,62 @@ HUNTING_GROUNDS = Path.home() / "Downloads"
 DEFAULT_CATEGORIES = {
     "FINANCIAL": [".pdf", ".csv", ".xlsx", ".xls"],
     "PERSONAL": [".pdf", ".docx", ".doc", ".txt", ".rtf"],
-    "RESEARCH": [".pdf", ".md", ".html", ".htm", ".py", ".js", ".ts", ".sh",
-                 ".c", ".cpp", ".h", ".java", ".go", ".rs", ".rb", ".pl",
-                 ".lua", ".m", ".swift", ".kt"],
+    "RESEARCH": [
+        ".pdf",
+        ".md",
+        ".html",
+        ".htm",
+        ".py",
+        ".js",
+        ".ts",
+        ".sh",
+        ".c",
+        ".cpp",
+        ".h",
+        ".java",
+        ".go",
+        ".rs",
+        ".rb",
+        ".pl",
+        ".lua",
+        ".m",
+        ".swift",
+        ".kt",
+    ],
     "MEDIA": [".jpg", ".jpeg", ".png", ".gif", ".mp3", ".mp4", ".wav"],
     "MISC": [],
 }
 
 _TEXT_EXTS = {
-    ".txt", ".md", ".html", ".htm", ".py", ".js", ".ts", ".sh",
-    ".c", ".cpp", ".h", ".java", ".go", ".rs", ".rb", ".pl",
-    ".lua", ".m", ".swift", ".kt", ".toml", ".json", ".yaml",
-    ".yml", ".xml", ".ini", ".cfg", ".rtf", ".log",
+    ".txt",
+    ".md",
+    ".html",
+    ".htm",
+    ".py",
+    ".js",
+    ".ts",
+    ".sh",
+    ".c",
+    ".cpp",
+    ".h",
+    ".java",
+    ".go",
+    ".rs",
+    ".rb",
+    ".pl",
+    ".lua",
+    ".m",
+    ".swift",
+    ".kt",
+    ".toml",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".xml",
+    ".ini",
+    ".cfg",
+    ".rtf",
+    ".log",
 }
 
 EXTENSION_MAP = {}
@@ -66,21 +116,119 @@ for _cat, _exts in DEFAULT_CATEGORIES.items():
     for _ext in _exts:
         EXTENSION_MAP.setdefault(_ext, _cat)
 
-STOPWORDS = frozenset({
-    "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
-    "of", "with", "by", "from", "up", "about", "into", "over", "after",
-    "what", "who", "how", "is", "are", "was", "were", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "could",
-    "should", "may", "might", "shall", "can", "not", "no", "nor", "so",
-    "than", "too", "very", "just", "only", "own", "same", "that", "this",
-    "these", "those", "then", "there", "here", "where", "when", "why",
-    "all", "each", "every", "both", "few", "more", "most", "other",
-    "some", "such", "any", "its", "my", "your", "his", "her", "our",
-    "their", "which", "whom", "whose", "if", "because", "as", "until",
-    "while", "also", "between", "through", "during", "before",
-    "connects", "connect", "link", "linked", "related", "thread",
-    "web", "ties", "find", "show", "tell", "know", "file", "files",
-})
+STOPWORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "but",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "of",
+        "with",
+        "by",
+        "from",
+        "up",
+        "about",
+        "into",
+        "over",
+        "after",
+        "what",
+        "who",
+        "how",
+        "is",
+        "are",
+        "was",
+        "were",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "shall",
+        "can",
+        "not",
+        "no",
+        "nor",
+        "so",
+        "than",
+        "too",
+        "very",
+        "just",
+        "only",
+        "own",
+        "same",
+        "that",
+        "this",
+        "these",
+        "those",
+        "then",
+        "there",
+        "here",
+        "where",
+        "when",
+        "why",
+        "all",
+        "each",
+        "every",
+        "both",
+        "few",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "any",
+        "its",
+        "my",
+        "your",
+        "his",
+        "her",
+        "our",
+        "their",
+        "which",
+        "whom",
+        "whose",
+        "if",
+        "because",
+        "as",
+        "until",
+        "while",
+        "also",
+        "between",
+        "through",
+        "during",
+        "before",
+        "connects",
+        "connect",
+        "link",
+        "linked",
+        "related",
+        "thread",
+        "web",
+        "ties",
+        "find",
+        "show",
+        "tell",
+        "know",
+        "file",
+        "files",
+    }
+)
 
 GROOM_COMBINED_SUFFIX = """
 Process these files and return **ONLY** valid JSON. No explanations, no markdown.
@@ -122,6 +270,7 @@ LOADER_MAP = {
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Database Init + Migrations
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 def init_db(config: GrimalkinConfig) -> sqlite3.Connection:
     """Initialize SQLite with WAL mode. Single connection, shared across threads."""
@@ -319,12 +468,15 @@ def migrate_faiss_v4_to_v5(ctx: AppContext):
         if chunks:
             ctx.memory.add_chunks(chunks, fh)
     ctx.memory.save()
-    log.info(f"Migration done — {ctx.memory.total_vectors()} vectors with file_hash tracking.")
+    log.info(
+        f"Migration done — {ctx.memory.total_vectors()} vectors with file_hash tracking."
+    )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Settings Helpers
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 def get_setting(db, key: str, default: str = "") -> str:
     cur = db.cursor()
@@ -334,7 +486,9 @@ def get_setting(db, key: str, default: str = "") -> str:
 
 
 def set_setting(db, key: str, value: str):
-    db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+    db.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value))
+    )
     db.commit()
 
 
@@ -389,6 +543,7 @@ def ensure_dirs(config: GrimalkinConfig, db=None):
 # Persona
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
 def build_persona(db, config: GrimalkinConfig) -> str:
     """Base persona system prompt."""
     name = get_setting(db, "pet_name", "Grimalkin")
@@ -410,6 +565,7 @@ def build_enhanced_persona(ctx: AppContext, task_type: str = "general") -> str:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # File Operations
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 def file_hash(filepath: Path) -> str:
     """SHA-256 of file content."""
@@ -443,7 +599,8 @@ def load_and_chunk(filepath: Path, config: GrimalkinConfig = None) -> list:
     chunk_size = config.chunk_size if config else 800
     chunk_overlap = config.chunk_overlap if config else 100
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
     )
 
     try:
@@ -505,11 +662,14 @@ def sort_file(ctx: AppContext, filepath: Path, defer_save: bool = False) -> dict
     indexed_count = ctx.memory.add_chunks(chunks, fh)
     indexed = 1 if indexed_count > 0 else 0
 
-    ctx.db.execute("""
+    ctx.db.execute(
+        """
         INSERT OR IGNORE INTO file_memory
         (filename, original_path, sorted_path, category, file_hash, indexed)
         VALUES (?, ?, ?, ?, ?, ?)
-    """, (dest_path.name, str(filepath), str(dest_path), category, fh, indexed))
+    """,
+        (dest_path.name, str(filepath), str(dest_path), category, fh, indexed),
+    )
     ctx.db.commit()
 
     if indexed and not defer_save:
@@ -572,7 +732,9 @@ def reindex_unindexed(ctx: AppContext) -> str:
         ctx.memory.save()
         ctx.db.commit()
 
-    lines = [f"Indexed {indexed_count} file{'s' if indexed_count != 1 else ''} into the web."]
+    lines = [
+        f"Indexed {indexed_count} file{'s' if indexed_count != 1 else ''} into the web."
+    ]
     if failed:
         lines.append(f"{len(failed)} resisted: {', '.join(failed)}")
     return " ".join(lines)
@@ -608,11 +770,14 @@ def ingest_sorted(ctx: AppContext) -> str:
             added = ctx.memory.add_chunks(chunks, fh)
             indexed = 1 if added > 0 else 0
 
-            ctx.db.execute("""
+            ctx.db.execute(
+                """
                 INSERT OR IGNORE INTO file_memory
                 (filename, original_path, sorted_path, category, file_hash, indexed)
                 VALUES (?, ?, ?, ?, ?, ?)
-            """, (fpath.name, str(fpath), str(fpath), category, fh, indexed))
+            """,
+                (fpath.name, str(fpath), str(fpath), category, fh, indexed),
+            )
 
             if indexed:
                 indexed_count += 1
@@ -628,7 +793,9 @@ def ingest_sorted(ctx: AppContext) -> str:
     if discovered == 0:
         return "I have walked every corridor of sorted/. No orphans found."
 
-    lines = [f"Discovered {discovered} orphan{'s' if discovered != 1 else ''}. Indexed {indexed_count}."]
+    lines = [
+        f"Discovered {discovered} orphan{'s' if discovered != 1 else ''}. Indexed {indexed_count}."
+    ]
     if failed:
         lines.append(f"{len(failed)} could not be chunked.")
     return " ".join(lines)
@@ -638,11 +805,12 @@ def ingest_sorted(ctx: AppContext) -> str:
 # JSON Repair (for groom responses)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
 def repair_json(raw: str) -> dict:
-    raw = re.sub(r'```json\s*|\s*```', '', raw, flags=re.IGNORECASE)
-    raw = re.sub(r'^.*?(?=[\[{])', '', raw, count=1, flags=re.DOTALL)
+    raw = re.sub(r"```json\s*|\s*```", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"^.*?(?=[\[{])", "", raw, count=1, flags=re.DOTALL)
     raw = raw.strip()
-    raw = re.sub(r',\s*([}\]])', r'\1', raw)
+    raw = re.sub(r",\s*([}\]])", r"\1", raw)
     try:
         data = json.loads(raw)
         if isinstance(data, dict) and "files" in data:
@@ -658,19 +826,22 @@ def parse_groom_response(response: str) -> list[dict]:
     data = repair_json(response)
     results = []
     for entry in data.get("files", []):
-        results.append({
-            "filename": entry.get("filename", ""),
-            "tags": entry.get("tags", []),
-            "note": entry.get("note", ""),
-            "entities": entry.get("entities", []),
-            "relations": entry.get("relations", []),
-        })
+        results.append(
+            {
+                "filename": entry.get("filename", ""),
+                "tags": entry.get("tags", []),
+                "note": entry.get("note", ""),
+                "entities": entry.get("entities", []),
+                "relations": entry.get("relations", []),
+            }
+        )
     return results
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Knowledge Graph — Entity Ingestion (Target 5: with embeddings + trust)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 def ingest_entities(db, filename: str, entities: list, llm: LLMBackend = None):
     """
@@ -686,17 +857,23 @@ def ingest_entities(db, filename: str, entities: list, llm: LLMBackend = None):
         if not name:
             continue
         etype = e.get("type", "topic")
-        cur.execute("""
+        cur.execute(
+            """
             INSERT INTO entities (name, type, first_seen, trust_score)
             VALUES (?, ?, date('now'), 1.0)
             ON CONFLICT(name) DO UPDATE SET
                 times_seen = times_seen + 1,
                 type = COALESCE(?, type)
-        """, (name, etype, etype))
+        """,
+            (name, etype, etype),
+        )
 
-        eid = cur.lastrowid or cur.execute(
-            "SELECT id FROM entities WHERE name=?", (name,)
-        ).fetchone()[0]
+        eid = (
+            cur.lastrowid
+            or cur.execute("SELECT id FROM entities WHERE name=?", (name,)).fetchone()[
+                0
+            ]
+        )
 
         if llm:
             pending_embeds.append((eid, f"{name} ({etype})"))
@@ -710,8 +887,10 @@ def ingest_entities(db, filename: str, entities: list, llm: LLMBackend = None):
             embeddings = llm.embed_texts(texts)
             for (eid, _), emb in zip(pending_embeds, embeddings):
                 emb_arr = np.array(emb, dtype=np.float32)
-                cur.execute("UPDATE entities SET embedding = ? WHERE id = ?",
-                            (emb_arr.tobytes(), eid))
+                cur.execute(
+                    "UPDATE entities SET embedding = ? WHERE id = ?",
+                    (emb_arr.tobytes(), eid),
+                )
             db.commit()
         except Exception as e:
             log.warning(f"Entity batch embedding failed: {e}")
@@ -731,11 +910,14 @@ def ingest_relationships(db, filename: str, relations: list):
         tgt = cur.fetchone()
         if not src or not tgt:
             continue
-        cur.execute("""
+        cur.execute(
+            """
             INSERT OR IGNORE INTO relationships
             (source_id, target_id, relation_type, source_file, seen)
             VALUES (?, ?, ?, ?, date('now'))
-        """, (src[0], tgt[0], r.get("type", "mentioned_with"), filename))
+        """,
+            (src[0], tgt[0], r.get("type", "mentioned_with"), filename),
+        )
     db.commit()
 
 
@@ -749,6 +931,7 @@ def graph_stats(db) -> dict:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Semantic Graph Context (Target 5 — replaces old graph_query LIKE '%word%')
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 def semantic_graph_context(ctx: AppContext, query: str, k: int = 8) -> str:
     """
@@ -768,7 +951,9 @@ def semantic_graph_context(ctx: AppContext, query: str, k: int = 8) -> str:
         return ""
 
     cur = ctx.db.cursor()
-    cur.execute("SELECT id, name, type, trust_score, embedding FROM entities WHERE embedding IS NOT NULL")
+    cur.execute(
+        "SELECT id, name, type, trust_score, embedding FROM entities WHERE embedding IS NOT NULL"
+    )
 
     candidates = []
     for eid, name, etype, trust, emb_bytes in cur.fetchall():
@@ -776,7 +961,9 @@ def semantic_graph_context(ctx: AppContext, query: str, k: int = 8) -> str:
             continue
         emb = np.frombuffer(emb_bytes, dtype=np.float32)
         if len(emb) != len(q_emb):
-            log.debug(f"Entity '{name}' embedding dim mismatch ({len(emb)} vs {len(q_emb)}), skipping")
+            log.debug(
+                f"Entity '{name}' embedding dim mismatch ({len(emb)} vs {len(q_emb)}), skipping"
+            )
             continue
         cos = np.dot(q_emb, emb) / (norm(q_emb) * norm(emb) + 1e-8)
         score = cos * (trust or 1.0)
@@ -794,7 +981,8 @@ def semantic_graph_context(ctx: AppContext, query: str, k: int = 8) -> str:
         tag = " *" if trust > 1.3 else ""
         summaries.append(f"- {name}{tag} ({etype}, trust:{trust:.1f})")
 
-        cur.execute("""
+        cur.execute(
+            """
             SELECT r.relation_type, e2.name, r.source_file
             FROM relationships r JOIN entities e2 ON r.target_id = e2.id
             WHERE r.source_id = ?
@@ -803,7 +991,9 @@ def semantic_graph_context(ctx: AppContext, query: str, k: int = 8) -> str:
             FROM relationships r JOIN entities e1 ON r.source_id = e1.id
             WHERE r.target_id = ?
             LIMIT 6
-        """, (eid, eid))
+        """,
+            (eid, eid),
+        )
 
         for rel, tgt, srcf in cur.fetchall():
             key = (name, tgt)
@@ -817,6 +1007,7 @@ def semantic_graph_context(ctx: AppContext, query: str, k: int = 8) -> str:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Hybrid RAG (keyword + semantic + graph)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 def keyword_search(db, query: str, limit: int = 10) -> set[str]:
     """Multi-term OR keyword boost on filename/notes/tags."""
@@ -870,13 +1061,15 @@ def hybrid_vault_rag(ctx: AppContext, query: str) -> str:
     # Add keyword-only matches that FAISS missed
     for fn in kw_fns:
         if fn not in seen:
-            boosted.append(ChunkRecord(
-                text=f"(keyword match, no chunks: {fn})",
-                filename=fn,
-                source_path="",
-                file_hash="",
-                score=0.1,
-            ))
+            boosted.append(
+                ChunkRecord(
+                    text=f"(keyword match, no chunks: {fn})",
+                    filename=fn,
+                    source_path="",
+                    file_hash="",
+                    score=0.1,
+                )
+            )
             seen.add(fn)
 
     if not boosted:
@@ -916,7 +1109,9 @@ def recall(ctx: AppContext, term: str) -> str:
     context = f"Graph threads:\n{g}\n\nFiles with keyword: {kw_list}\n\nPast reflections:\n{refs_text}"
 
     persona = build_enhanced_persona(ctx, "general")
-    return ctx.llm.respond(f"Tell me everything about {term}.", context=context, persona=persona)
+    return ctx.llm.respond(
+        f"Tell me everything about {term}.", context=context, persona=persona
+    )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -925,6 +1120,7 @@ def recall(ctx: AppContext, term: str) -> str:
 
 try:
     import plotly.graph_objects as go
+
     HAS_PLOTLY = True
 except ImportError:
     HAS_PLOTLY = False
@@ -947,7 +1143,7 @@ def spring_layout(nodes: list[str], edges: list[tuple], iterations: int = 50) ->
             for j in range(i + 1, n):
                 delta = pos[i] - pos[j]
                 dist = max(np.linalg.norm(delta), 1e-4)
-                f = (k ** 2 / dist ** 2) * (delta / dist)
+                f = (k**2 / dist**2) * (delta / dist)
                 force[i] += f
                 force[j] -= f
         for src, tgt in edges:
@@ -983,25 +1179,34 @@ def build_loom_data(db, filter_type: str = None, search_term: str = "") -> dict:
         params,
     )
     nodes_raw = cur.fetchall()
-    nodes = [{"id": n[0], "type": n[1], "size": min(40, max(8, n[2] * 1.5)), "imp": n[3]}
-             for n in nodes_raw]
+    nodes = [
+        {"id": n[0], "type": n[1], "size": min(40, max(8, n[2] * 1.5)), "imp": n[3]}
+        for n in nodes_raw
+    ]
     node_names = [n["id"] for n in nodes]
 
     if not node_names:
         return {"nodes": nodes, "edges": [], "stats": {"nodes": 0, "edges": 0}}
 
     placeholders = ",".join(["?"] * len(node_names))
-    cur.execute(f"""
+    cur.execute(
+        f"""
         SELECT e1.name, e2.name, r.relation_type, COUNT(*) as strength
         FROM relationships r
         JOIN entities e1 ON r.source_id = e1.id
         JOIN entities e2 ON r.target_id = e2.id
         WHERE e1.name IN ({placeholders}) AND e2.name IN ({placeholders})
         GROUP BY e1.name, e2.name, r.relation_type
-    """, node_names + node_names)
+    """,
+        node_names + node_names,
+    )
     edges = [(row[0], row[1], row[2]) for row in cur.fetchall()]
 
-    return {"nodes": nodes, "edges": edges, "stats": {"nodes": len(nodes), "edges": len(edges)}}
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "stats": {"nodes": len(nodes), "edges": len(edges)},
+    }
 
 
 def build_loom_figure(db, filter_type: str = None, search_term: str = ""):
@@ -1012,12 +1217,15 @@ def build_loom_figure(db, filter_type: str = None, search_term: str = ""):
             fig = go.Figure()
             fig.add_annotation(
                 text="The Loom is bare.<br>Bring me files and I shall spin.",
-                showarrow=False, font=dict(size=18),
+                showarrow=False,
+                font=dict(size=18),
             )
             fig.update_layout(template="plotly_dark", height=600)
             return fig
-        return ("<div style='padding:40px;text-align:center;font-size:1.3em;color:#666'>"
-                "The Loom is bare. Bring me files and I shall spin.</div>")
+        return (
+            "<div style='padding:40px;text-align:center;font-size:1.3em;color:#666'>"
+            "The Loom is bare. Bring me files and I shall spin.</div>"
+        )
 
     nodes = data["nodes"]
     edges = data["edges"]
@@ -1037,8 +1245,12 @@ def build_loom_figure(db, filter_type: str = None, search_term: str = ""):
         node_y = [pos[n["id"]][1] for n in nodes if n["id"] in pos]
         node_size = [n["size"] for n in nodes if n["id"] in pos]
         color_map = {
-            "person": "#00ffcc", "org": "#ff6b6b", "date": "#ffd93d",
-            "location": "#6bcbff", "amount": "#ff9ff3", "topic": "#a29bfe",
+            "person": "#00ffcc",
+            "org": "#ff6b6b",
+            "date": "#ffd93d",
+            "location": "#6bcbff",
+            "amount": "#ff9ff3",
+            "topic": "#a29bfe",
         }
         node_color = [color_map.get(n["type"], "#888") for n in nodes if n["id"] in pos]
         node_text = [n["id"] for n in nodes if n["id"] in pos]
@@ -1053,23 +1265,35 @@ def build_loom_figure(db, filter_type: str = None, search_term: str = ""):
         ]
 
         fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=edge_x, y=edge_y, mode='lines',
-            line=dict(color='#555', width=1), hoverinfo='none',
-        ))
-        fig.add_trace(go.Scatter(
-            x=node_x, y=node_y,
-            mode='markers+text',
-            marker=dict(size=node_size, color=node_color, line=dict(width=2, color='#000')),
-            text=node_text,
-            textposition="top center",
-            hovertext=node_hover,
-            customdata=node_text,
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=edge_x,
+                y=edge_y,
+                mode="lines",
+                line=dict(color="#555", width=1),
+                hoverinfo="none",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=node_x,
+                y=node_y,
+                mode="markers+text",
+                marker=dict(
+                    size=node_size, color=node_color, line=dict(width=2, color="#000")
+                ),
+                text=node_text,
+                textposition="top center",
+                hovertext=node_hover,
+                customdata=node_text,
+            )
+        )
         fig.update_layout(
             title="The Loom — Threads of Knowledge",
             showlegend=False,
-            plot_bgcolor="#111", paper_bgcolor="#111", font_color="#ccc",
+            plot_bgcolor="#111",
+            paper_bgcolor="#111",
+            font_color="#ccc",
             height=620,
             margin=dict(l=20, r=20, t=40, b=20),
             xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
@@ -1097,7 +1321,8 @@ def describe_node(db, entity_name: str) -> str:
     if not row:
         return "I do not know this name yet."
     etype, times = row
-    cur.execute("""
+    cur.execute(
+        """
         SELECT r.relation_type, e2.name, r.source_file
         FROM relationships r JOIN entities e2 ON r.target_id = e2.id
         WHERE r.source_id = (SELECT id FROM entities WHERE name=?)
@@ -1106,7 +1331,9 @@ def describe_node(db, entity_name: str) -> str:
         FROM relationships r JOIN entities e1 ON r.source_id = e1.id
         WHERE r.target_id = (SELECT id FROM entities WHERE name=?)
         LIMIT 12
-    """, (entity_name, entity_name))
+    """,
+        (entity_name, entity_name),
+    )
     threads = cur.fetchall()
     if not threads:
         return f"* {entity_name} ({etype}) stands alone so far. {times} sightings."
@@ -1119,14 +1346,17 @@ def describe_node(db, entity_name: str) -> str:
 
 def find_clusters(db, top_n: int = 5) -> str:
     cur = db.cursor()
-    cur.execute("""
+    cur.execute(
+        """
         SELECT e1.name, e2.name, COUNT(*) as strength
         FROM relationships r
         JOIN entities e1 ON r.source_id = e1.id
         JOIN entities e2 ON r.target_id = e2.id
         GROUP BY e1.name, e2.name
         ORDER BY strength DESC LIMIT ?
-    """, (top_n * 3,))
+    """,
+        (top_n * 3,),
+    )
     clusters = cur.fetchall()
     if not clusters:
         return "No knots yet. The web is young."
@@ -1168,6 +1398,7 @@ def export_loom_markdown(db, config: GrimalkinConfig) -> Path:
 # Entity Management (merge, forget, importance, trust)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
 def merge_entity(db, name_keep: str, name_delete: str) -> str:
     cur = db.cursor()
     cur.execute("SELECT id, times_seen FROM entities WHERE name=?", (name_keep,))
@@ -1185,9 +1416,16 @@ def merge_entity(db, name_keep: str, name_delete: str) -> str:
         keeper_id, delete_id = delete_id, keeper_id
         name_keep, name_delete = name_delete, name_keep
 
-    cur.execute("UPDATE relationships SET source_id=? WHERE source_id=?", (keeper_id, delete_id))
-    cur.execute("UPDATE relationships SET target_id=? WHERE target_id=?", (keeper_id, delete_id))
-    cur.execute("UPDATE entities SET times_seen = times_seen + ? WHERE id=?", (delete_ts, keeper_id))
+    cur.execute(
+        "UPDATE relationships SET source_id=? WHERE source_id=?", (keeper_id, delete_id)
+    )
+    cur.execute(
+        "UPDATE relationships SET target_id=? WHERE target_id=?", (keeper_id, delete_id)
+    )
+    cur.execute(
+        "UPDATE entities SET times_seen = times_seen + ? WHERE id=?",
+        (delete_ts, keeper_id),
+    )
     cur.execute("DELETE FROM entities WHERE id=?", (delete_id,))
     cur.execute("""
         DELETE FROM relationships WHERE rowid NOT IN (
@@ -1203,7 +1441,10 @@ def merge_entity(db, name_keep: str, name_delete: str) -> str:
 def set_entity_importance(db, entity_name: str, important: bool) -> str:
     """Mark entity as important. Target 5: also boosts trust + propagates."""
     cur = db.cursor()
-    cur.execute("UPDATE entities SET importance=? WHERE name=?", (1 if important else 0, entity_name))
+    cur.execute(
+        "UPDATE entities SET importance=? WHERE name=?",
+        (1 if important else 0, entity_name),
+    )
     if cur.rowcount == 0:
         return "I do not know this name."
 
@@ -1213,7 +1454,8 @@ def set_entity_importance(db, entity_name: str, important: bool) -> str:
             "UPDATE entities SET trust_score = MIN(2.0, trust_score + 0.5) WHERE name=?",
             (entity_name,),
         )
-        cur.execute("""
+        cur.execute(
+            """
             UPDATE entities SET trust_score = MIN(2.0, trust_score + 0.15)
             WHERE id IN (
                 SELECT DISTINCT source_id FROM relationships
@@ -1222,10 +1464,14 @@ def set_entity_importance(db, entity_name: str, important: bool) -> str:
                 SELECT DISTINCT target_id FROM relationships
                 WHERE source_id = (SELECT id FROM entities WHERE name=?)
             )
-        """, (entity_name, entity_name))
+        """,
+            (entity_name, entity_name),
+        )
 
     db.commit()
-    return f"I shall watch *{entity_name}* {'closely' if important else 'less intently'}."
+    return (
+        f"I shall watch *{entity_name}* {'closely' if important else 'less intently'}."
+    )
 
 
 def forget_entity(db, entity_name: str) -> str:
@@ -1235,7 +1481,9 @@ def forget_entity(db, entity_name: str) -> str:
     if not row:
         return "That name was never here."
     eid = row[0]
-    cur.execute("DELETE FROM relationships WHERE source_id=? OR target_id=?", (eid, eid))
+    cur.execute(
+        "DELETE FROM relationships WHERE source_id=? OR target_id=?", (eid, eid)
+    )
     cur.execute("DELETE FROM entities WHERE id=?", (eid,))
     db.commit()
     return f"The name dissolves. The threads fall away. *{entity_name}* was never here."
@@ -1261,8 +1509,12 @@ def proactive_whispers(db, bond_level: int) -> list[str]:
     if bond_level < 60:
         return []
     cur = db.cursor()
-    cur.execute("SELECT name, times_seen FROM entities WHERE times_seen >= 3 ORDER BY times_seen DESC LIMIT 1")
+    cur.execute(
+        "SELECT name, times_seen FROM entities WHERE times_seen >= 3 ORDER BY times_seen DESC LIMIT 1"
+    )
     row = cur.fetchone()
     if not row:
         return []
-    return [f"I notice *{row[0]}* has appeared {row[1]} times across my web. Coincidence?"]
+    return [
+        f"I notice *{row[0]}* has appeared {row[1]} times across my web. Coincidence?"
+    ]

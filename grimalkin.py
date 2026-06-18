@@ -56,9 +56,7 @@ _REQUIRED = [
     ("langchain-text-splitters", "langchain_text_splitters"),
     ("langchain-community", "langchain_community"),
 ]
-_missing = [
-    pkg for pkg, mod in _REQUIRED if importlib.util.find_spec(mod) is None
-]
+_missing = [pkg for pkg, mod in _REQUIRED if importlib.util.find_spec(mod) is None]
 if _missing:
     print("\nGrimalkin cannot wake — missing dependencies:")
     for pkg in _missing:
@@ -1312,10 +1310,14 @@ def load_and_chunk(filepath: Path) -> list:
         sys.executable,
         str(_PARSE_WORKER),
         str(filepath),
-        "--chunk-size", str(CFG.chunk_size),
-        "--chunk-overlap", str(CFG.chunk_overlap),
-        "--mem-mb", str(CFG.parse_mem_mb),
-        "--cpu-seconds", str(CFG.parse_timeout),
+        "--chunk-size",
+        str(CFG.chunk_size),
+        "--chunk-overlap",
+        str(CFG.chunk_overlap),
+        "--mem-mb",
+        str(CFG.parse_mem_mb),
+        "--cpu-seconds",
+        str(CFG.parse_timeout),
     ]
     # Pin BLAS/OpenMP to a single thread: the worker only parses text, and
     # multi-threaded BLAS reserves a large address space that collides with the
@@ -4572,7 +4574,9 @@ def _pulse_items(db) -> list[dict]:
             }
         )
 
-    cur.execute("SELECT COUNT(*) FROM file_memory WHERE burned_at IS NULL AND indexed=0")
+    cur.execute(
+        "SELECT COUNT(*) FROM file_memory WHERE burned_at IS NULL AND indexed=0"
+    )
     waiting = cur.fetchone()[0]
     if waiting:
         items.append(
@@ -4644,9 +4648,7 @@ def ui_pulse_rail(db) -> str:
     return (
         "<section class='pulse-rail' aria-label='Local pulse'>"
         "<div class='pulse-heading'>pulse</div>"
-        "<div class='pulse-track'>"
-        + "".join(items)
-        + "</div></section>"
+        "<div class='pulse-track'>" + "".join(items) + "</div></section>"
     )
 
 
@@ -4689,7 +4691,9 @@ def _adapter_engine_status(mode: str) -> tuple[str, str, str]:
             check=False,
         )
         if proc.returncode != 0:
-            detail = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+            detail = (
+                proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+            )
             return "unknown", _clip(detail, 120), "warn"
         status = json.loads(proc.stdout)
     except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
@@ -4806,9 +4810,7 @@ def ui_control_deck(db) -> str:
     endpoint_local = _is_loopback_url(CFG.ollama_url)
     network_value = "loopback" if endpoint_local else "external"
     network_class = "warn" if endpoint_local else "bad"
-    network_detail = (
-        f"Ollama {endpoint}; outbound quarantine is advisory in this build"
-    )
+    network_detail = f"Ollama {endpoint}; outbound quarantine is advisory in this build"
 
     audit_enabled = get_setting(db, "audit_enabled", "1") == "1"
     audit_rows = _table_count(db, "audit_log")
@@ -4818,18 +4820,12 @@ def ui_control_deck(db) -> str:
     chat_rows = _table_count(db, "chat_history")
     vector_files = sum(1 for p in FAISS_INDEX_DIR.glob("*") if p.is_file())
     memory_value = get_setting(db, "memory_mode", "local_plaintext").replace("_", " ")
-    memory_detail = (
-        f"DB {_human_size(DB_PATH)} · {chat_rows} chat rows · {vector_files} vector files"
-    )
+    memory_detail = f"DB {_human_size(DB_PATH)} · {chat_rows} chat rows · {vector_files} vector files"
 
     files_total = _table_count(db, "file_memory", "WHERE burned_at IS NULL")
-    unindexed = _table_count(
-        db, "file_memory", "WHERE burned_at IS NULL AND indexed=0"
-    )
+    unindexed = _table_count(db, "file_memory", "WHERE burned_at IS NULL AND indexed=0")
     file_mode = "sandbox" if is_sandbox(db) else "live"
-    file_detail = (
-        f"{files_total} tracked files · {unindexed} waiting · scheduled hunt scans Downloads"
-    )
+    file_detail = f"{files_total} tracked files · {unindexed} waiting · scheduled hunt scans Downloads"
 
     source_value, source_detail, source_class = _git_snapshot()
 
@@ -4892,9 +4888,7 @@ def ui_control_deck(db) -> str:
         "<div><span>privacy posture</span><h2>Control Deck</h2></div>"
         f"<p>{_esc(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}</p>"
         "</div>"
-        "<div class='control-grid'>"
-        + "".join(cards)
-        + "</div>"
+        "<div class='control-grid'>" + "".join(cards) + "</div>"
         "<section class='control-audit'>"
         "<div><span>recent local actions</span><h3>Audit Trail</h3></div>"
         + audit_html

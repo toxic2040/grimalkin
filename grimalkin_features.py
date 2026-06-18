@@ -109,6 +109,7 @@ log = logging.getLogger("grimalkin")
 # Factory — the v5.0 startup pattern
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
 def make_context(
     config: GrimalkinConfig = None,
     backend: str = "ollama",
@@ -164,6 +165,7 @@ def make_context(
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Backward-compat shims — preserve v4.1 call-site signatures
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 def ollama_chat(
     prompt: str,
@@ -232,6 +234,7 @@ def ollama_chat(
     last_err = None
     for attempt in range(3):
         try:
+
             def _do_request():
                 return req.post(
                     f"{cfg.ollama_url}/v1/chat/completions",

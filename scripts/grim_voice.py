@@ -36,7 +36,9 @@ def _engine_rows() -> dict[str, list[dict[str, object]]]:
         "tts": [
             {
                 "engine": "piper",
-                "available": bool(_which("piper") and piper_model and Path(piper_model).exists()),
+                "available": bool(
+                    _which("piper") and piper_model and Path(piper_model).exists()
+                ),
                 "detail": piper_model or "set GRIM_PIPER_MODEL",
             },
             {
@@ -72,7 +74,9 @@ def _available(mode: str) -> list[str]:
     return [row["engine"] for row in _engine_rows()[mode] if row["available"]]
 
 
-def _run(cmd: list[str], *, input_text: str | None = None) -> subprocess.CompletedProcess:
+def _run(
+    cmd: list[str], *, input_text: str | None = None
+) -> subprocess.CompletedProcess:
     return subprocess.run(
         cmd,
         input=input_text,
@@ -130,7 +134,9 @@ def _stt_whisper(audio: Path, out_path: Path) -> int:
         if not transcript.exists():
             sys.stderr.write("whisper did not produce a transcript\n")
             return 1
-        _write_transcript(out_path, transcript.read_text(encoding="utf-8", errors="replace"))
+        _write_transcript(
+            out_path, transcript.read_text(encoding="utf-8", errors="replace")
+        )
     print(f"transcript written via whisper: {out_path}")
     return 0
 
@@ -250,7 +256,11 @@ def cmd_tts(args) -> int:
         _write_marker_wav(out_path)
         print(f"marker audio written: {out_path}")
         return 0
-    if engine in ("auto", "piper") and _which("piper") and os.environ.get("GRIM_PIPER_MODEL"):
+    if (
+        engine in ("auto", "piper")
+        and _which("piper")
+        and os.environ.get("GRIM_PIPER_MODEL")
+    ):
         return _tts_piper(text, out_path)
     if engine in ("auto", "espeak-ng") and _which("espeak-ng"):
         return _tts_espeak("espeak-ng", text, out_path)

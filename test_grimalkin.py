@@ -44,6 +44,7 @@ from grimalkin import (
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
+
 def make_test_db():
     """Create an in-memory DB with tables for keyword_search and chat memory tests."""
     db = sqlite3.connect(":memory:")
@@ -126,12 +127,22 @@ def insert_file(db, filename, category="MISC", tags="[]", notes="", indexed=1):
     db.execute(
         "INSERT INTO file_memory (filename, original_path, sorted_path, category, file_hash, indexed, tags, notes) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (filename, f"/orig/{filename}", f"/sorted/{filename}", category, fh, indexed, tags, notes),
+        (
+            filename,
+            f"/orig/{filename}",
+            f"/sorted/{filename}",
+            category,
+            fh,
+            indexed,
+            tags,
+            notes,
+        ),
     )
     db.commit()
 
 
 # ─── scrub_corporate ─────────────────────────────────────────────────────────
+
 
 def test_scrub_removes_corporate_phrases():
     text = "Certainly! I'd be happy to help you with that."
@@ -154,6 +165,7 @@ def test_scrub_case_insensitive():
 
 
 # ─── local control helpers ───────────────────────────────────────────────────
+
 
 def test_qwen3_no_think_added_once():
     assert _with_no_think("hello", "qwen3:8b") == "hello\n/no_think"
@@ -302,7 +314,7 @@ def test_loom_html_fallback_escapes_entities():
     db = make_graph_db()
     db.execute(
         "INSERT INTO entities (name, type, times_seen, importance) VALUES (?, ?, ?, ?)",
-        ('<img src=x onerror="alert(1)">', 'topic<script>', 3, 0),
+        ('<img src=x onerror="alert(1)">', "topic<script>", 3, 0),
     )
     db.commit()
     old_plotly = grimalkin.HAS_PLOTLY
@@ -321,7 +333,7 @@ def test_core_loom_html_fallback_escapes_entities():
     db = make_graph_db()
     db.execute(
         "INSERT INTO entities (name, type, times_seen, importance) VALUES (?, ?, ?, ?)",
-        ('<svg onload="alert(1)">', 'person<script>', 2, 0),
+        ('<svg onload="alert(1)">', "person<script>", 2, 0),
     )
     db.commit()
     old_plotly = grimalkin_core.HAS_PLOTLY
@@ -337,6 +349,7 @@ def test_core_loom_html_fallback_escapes_entities():
 
 
 # ─── ingestion gate + isolated parse worker ───────────────────────────────────
+
 
 def test_ingest_gate_rejects_unsupported_type():
     with tempfile.NamedTemporaryFile(suffix=".exe", delete=False) as f:
@@ -397,6 +410,7 @@ def test_parse_worker_fails_closed_under_low_memory_cap():
 
 # ─── file_hash ────────────────────────────────────────────────────────────────
 
+
 def test_file_hash_deterministic():
     with tempfile.NamedTemporaryFile(mode="wb", suffix=".txt", delete=False) as f:
         f.write(b"grimalkin test data")
@@ -422,6 +436,7 @@ def test_file_hash_differs_for_different_content():
 
 # ─── classify_file ────────────────────────────────────────────────────────────
 
+
 def test_classify_known_extensions():
     assert classify_file(Path("report.pdf")) == "FINANCIAL"
     assert classify_file(Path("data.csv")) == "FINANCIAL"
@@ -439,6 +454,7 @@ def test_classify_research_extensions():
 
 
 # ─── keyword_search ──────────────────────────────────────────────────────────
+
 
 def test_keyword_search_by_filename():
     db = make_test_db()
@@ -476,7 +492,9 @@ def test_keyword_search_excludes_burned():
     db = make_test_db()
     insert_file(db, "alive.txt", notes="important data")
     insert_file(db, "dead.txt", notes="important data")
-    db.execute("UPDATE file_memory SET burned_at = '2025-01-01' WHERE filename = 'dead.txt'")
+    db.execute(
+        "UPDATE file_memory SET burned_at = '2025-01-01' WHERE filename = 'dead.txt'"
+    )
     db.commit()
     results = keyword_search(db, "important")
     assert "alive.txt" in results
@@ -500,6 +518,7 @@ def test_keyword_search_empty_query():
 
 
 # ─── repair_json ──────────────────────────────────────────────────────────────
+
 
 def test_repair_json_clean():
     raw = json.dumps({"files": [{"filename": "test.pdf", "tags": ["tax"]}]})
@@ -537,6 +556,7 @@ def test_repair_json_total_garbage():
 
 
 # ─── spring_layout ────────────────────────────────────────────────────────────
+
 
 def test_spring_layout_empty():
     assert spring_layout([], []) == {}
@@ -578,6 +598,7 @@ def test_spring_layout_deterministic_with_seed():
 
 
 # ─── chat memory ─────────────────────────────────────────────────────────────
+
 
 def test_save_and_retrieve_chat():
     db = make_test_db()
@@ -639,6 +660,7 @@ def test_session_isolation():
 
 # ─── Runner ───────────────────────────────────────────────────────────────────
 
+
 def run_all():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = 0
@@ -658,5 +680,6 @@ def run_all():
 
 if __name__ == "__main__":
     import sys
+
     ok = run_all()
     sys.exit(0 if ok else 1)

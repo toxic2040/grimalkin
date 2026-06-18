@@ -1,6 +1,6 @@
 ![Grimalkin](grimalkin_avatar.jpg)
 
-**Your private AI familiar — fully local, fully yours**
+**Your private AI familiar and local security guardian — fully local, fully yours**
 
 [![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=white)](https://python.org)
 [![Ollama](https://img.shields.io/badge/Ollama-000000?logo=ollama&logoColor=white)](https://ollama.com)
@@ -11,9 +11,9 @@
 
 ---
 
-**~5200 LOC · 100% offline · Ollama + FAISS + Knowledge Graph + Local Voice**
+**~5200 LOC companion · Rust guardian · 100% offline · Ollama + FAISS + Knowledge Graph + Local Voice**
 
-Grimalkin is a local AI familiar that sorts your files, indexes them for instant Q&A, builds a knowledge graph of everything it finds, and develops a personality that sharpens the longer you spend together. No cloud, no API keys, no network tracking. One database, one bond, one cat.
+Grimalkin is two things: a local AI familiar that sorts your files, indexes them for instant Q&A, builds a knowledge graph of everything it finds, and develops a personality that sharpens the longer you spend together; and a privileged Rust guardian that watches for hostile activity and contains threats within a strict, auditable authority envelope. No cloud, no API keys, no network tracking. One database, one bond, one cat.
 
 ## Latest: v5.0.2
 
@@ -56,6 +56,22 @@ Grimalkin is a local AI familiar that sorts your files, indexes them for instant
 | Gradio 6.x | Web UI |
 | SQLite (WAL) | Persistent storage — files, entities, relationships, settings |
 | Plotly | Interactive graph visualization in The Loom |
+
+## The Guardian (Linux)
+
+grimalkin includes a local security guardian: a separate, privileged Rust daemon
+that watches for hostile activity against your files and system and contains it
+within a strict, auditable authority envelope — reversible, fail-closed
+containment for high-confidence threats, and an explicit ask for anything
+ambiguous. The security guarantees live in a small, deterministic, memory-safe
+harness, not in a model.
+
+The guardian is **off until you turn it on** and is Linux-only (it uses NFQUEUE,
+nftables, cgroup-v2, and fanotify). It lives under `guardian/` and is built
+separately (`cd guardian && cargo build --release`). The companion drives it
+over a local Unix socket; wiring the Control Deck to it is the next slice.
+
+The whole project — companion and guardian — is MIT licensed.
 
 ## Quick Start
 
@@ -170,6 +186,10 @@ grimalkin/
 ├── grimalkin.db              # SQLite database (created on first run)
 ├── requirements.txt
 ├── LICENSE
+├── guardian/                 # Rust security guardian (Linux-only, built separately)
+│   ├── Cargo.toml
+│   ├── crates/               # familiar-core, familiar-linux, familiar-daemon, ...
+│   └── PROVENANCE.md
 ├── sorted/                   # Organized files (created on first run)
 │   ├── FINANCIAL/
 │   ├── PERSONAL/
