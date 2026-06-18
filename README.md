@@ -73,9 +73,13 @@ ollama pull nomic-embed-text     # embedding model
 ```bash
 git clone https://github.com/toxic2040/grimalkin.git
 cd grimalkin
-pip install -r requirements.txt
+pip install --require-hashes -r requirements-lock.txt   # reproducible, hash-pinned
 cp .env.example .env
 ```
+
+`requirements-lock.txt` is the canonical, hash-verified install set. `requirements.txt`
+holds the human-readable direct dependencies and minimum safe version floors; regenerate
+the lock from it with `pip-compile` after changing a dependency (see `SECURITY.md`).
 
 ### 3. Run
 

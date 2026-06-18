@@ -20,6 +20,7 @@ from grimalkin import (
     _check_auth,
     _command_status,
     _gradio_file_paths,
+    _ingest_allowed,
     _is_loopback_host,
     _strip_think_artifacts,
     _validate_launch_security,
@@ -38,7 +39,6 @@ from grimalkin import (
     spring_layout,
     ui_pyre_row_select,
     ui_control_deck,
-    EXTENSION_MAP,
 )
 
 
@@ -334,6 +334,65 @@ def test_core_loom_html_fallback_escapes_entities():
     assert "person<script>" not in html
     assert "&lt;svg" in html
     assert "person&lt;script&gt;" in html
+
+
+# ─── ingestion gate + isolated parse worker ───────────────────────────────────
+
+def test_ingest_gate_rejects_unsupported_type():
+    with tempfile.NamedTemporaryFile(suffix=".exe", delete=False) as f:
+        path = Path(f.name)
+    try:
+        ok, why = _ingest_allowed(path)
+        assert ok is False
+        assert "unsupported" in why
+    finally:
+        path.unlink()
+
+
+def test_ingest_gate_rejects_oversize():
+    old_cfg = grimalkin.CFG
+    with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
+        f.write(b"prey")
+        path = Path(f.name)
+    try:
+        grimalkin.CFG = replace(old_cfg, max_ingest_mb=0)
+        ok, why = _ingest_allowed(path)
+        assert ok is False
+        assert "ingest limit" in why
+        # Gate short-circuits before the worker is ever spawned.
+        assert grimalkin.load_and_chunk(path) == []
+    finally:
+        grimalkin.CFG = old_cfg
+        path.unlink()
+
+
+def test_parse_worker_returns_chunks_for_text():
+    with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w") as f:
+        f.write("Grimalkin guards the vault. The cat remembers every thread.")
+        path = Path(f.name)
+    try:
+        chunks = grimalkin.load_and_chunk(path)
+        assert len(chunks) >= 1
+        assert "Grimalkin" in chunks[0].page_content
+        assert chunks[0].metadata["filename"] == path.name
+        assert chunks[0].metadata["source_path"] == str(path)
+    finally:
+        path.unlink()
+
+
+def test_parse_worker_fails_closed_under_low_memory_cap():
+    """A memory cap too small to even import the parser must degrade to [],
+    never crash the caller — the containment guarantee."""
+    old_cfg = grimalkin.CFG
+    with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w") as f:
+        f.write("prey")
+        path = Path(f.name)
+    try:
+        grimalkin.CFG = replace(old_cfg, parse_mem_mb=48)
+        assert grimalkin.load_and_chunk(path) == []
+    finally:
+        grimalkin.CFG = old_cfg
+        path.unlink()
 
 
 # ─── file_hash ────────────────────────────────────────────────────────────────

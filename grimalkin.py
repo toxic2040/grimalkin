@@ -71,7 +71,6 @@ os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
 import faiss  # noqa: E402
 import gradio as gr  # noqa: E402
 import numpy as np  # noqa: E402
-from langchain_text_splitters import RecursiveCharacterTextSplitter  # noqa: E402
 from langchain_community.document_loaders import (  # noqa: E402
     PyPDFLoader,
     TextLoader,
@@ -100,7 +99,7 @@ except ImportError:
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
 
-VERSION = "5.0.2"
+VERSION = "5.0.3"
 APP_DIR = Path(__file__).resolve().parent
 VAULT_DIR = APP_DIR / "vault"
 SORTED_BASE = APP_DIR / "sorted"
@@ -150,6 +149,10 @@ class GrimConfig:
     keep_voice_audio: bool = False
     graph_injection: str = "auto"  # "auto", "always", "never"
     sandbox: bool = False  # dry-run mode for Pyre — no real deletions
+    # Ingestion guards — files are parsed in an isolated worker (grimalkin_parse.py)
+    max_ingest_mb: int = 25  # reject larger files before parsing
+    parse_timeout: int = 60  # wall-clock seconds per file in the parse worker
+    parse_mem_mb: int = 1024  # address-space cap for the parse worker
     # Bond gates
     pyre_bond_gate: int = 30
     graph_whisper_gate: int = 40
@@ -1271,27 +1274,101 @@ LOADER_MAP = {
 }
 
 embeddings = OllamaEmbeddings(model=CFG.embed_model, base_url=CFG.ollama_url)
-text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=CFG.chunk_size, chunk_overlap=CFG.chunk_overlap
-)
+
+
+_PARSE_WORKER = APP_DIR / "grimalkin_parse.py"
+
+_ParsedChunk = namedtuple("_ParsedChunk", ["page_content", "metadata"])
+
+
+def _ingest_allowed(filepath: Path) -> tuple[bool, str]:
+    """Type + size gate applied before a file ever reaches a parser."""
+    if filepath.suffix.lower() not in LOADER_MAP:
+        return False, "unsupported type"
+    try:
+        size = filepath.stat().st_size
+    except OSError as e:
+        return False, f"cannot stat: {e}"
+    limit = CFG.max_ingest_mb * 1024 * 1024
+    if size > limit:
+        return False, f"exceeds {CFG.max_ingest_mb} MB ingest limit"
+    return True, ""
 
 
 def load_and_chunk(filepath: Path) -> list:
-    ext = filepath.suffix.lower()
-    loader_cls = LOADER_MAP.get(ext)
-    if not loader_cls:
+    """Parse a file into chunks via the isolated worker.
+
+    The actual parser stack (pypdf, unstructured, lxml, …) runs in a separate
+    process with memory + CPU caps and a wall-clock timeout, so a hostile or
+    malformed file cannot hang or exhaust the main process. On any failure we
+    return [] — the file simply does not get indexed.
+    """
+    ok, why = _ingest_allowed(filepath)
+    if not ok:
+        log.warning(f"Skipping {filepath.name}: {why}")
+        return []
+
+    cmd = [
+        sys.executable,
+        str(_PARSE_WORKER),
+        str(filepath),
+        "--chunk-size", str(CFG.chunk_size),
+        "--chunk-overlap", str(CFG.chunk_overlap),
+        "--mem-mb", str(CFG.parse_mem_mb),
+        "--cpu-seconds", str(CFG.parse_timeout),
+    ]
+    # Pin BLAS/OpenMP to a single thread: the worker only parses text, and
+    # multi-threaded BLAS reserves a large address space that collides with the
+    # RLIMIT_AS cap the worker sets on itself.
+    parse_env = {
+        **os.environ,
+        "OPENBLAS_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "NUMEXPR_NUM_THREADS": "1",
+    }
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=CFG.parse_timeout,
+            check=False,
+            cwd=str(APP_DIR),
+            env=parse_env,
+        )
+    except subprocess.TimeoutExpired:
+        log.warning(f"Parse timed out for {filepath.name} (> {CFG.parse_timeout}s)")
+        return []
+    except OSError as e:
+        log.error(f"Parse worker failed to start: {e}")
+        return []
+
+    if proc.returncode != 0:
+        log.warning(
+            f"Parse worker exited {proc.returncode} for {filepath.name}: "
+            f"{proc.stderr.strip()[:200]}"
+        )
         return []
     try:
-        loader = loader_cls(str(filepath))
-        docs = loader.load()
-        chunks = text_splitter.split_documents(docs)
-        for chunk in chunks:
-            chunk.metadata["filename"] = filepath.name
-            chunk.metadata["source_path"] = str(filepath)
-        return chunks
-    except Exception as e:
-        log.warning(f"Failed to load {filepath.name}: {e}")
+        data = json.loads(proc.stdout)
+    except (json.JSONDecodeError, ValueError):
+        log.warning(f"Parse worker returned no valid JSON for {filepath.name}")
         return []
+    if not data.get("ok"):
+        log.warning(f"Failed to load {filepath.name}: {data.get('error')}")
+        return []
+
+    return [
+        _ParsedChunk(
+            c.get("text", ""),
+            {
+                "filename": c.get("filename", ""),
+                "source_path": c.get("source_path", ""),
+            },
+        )
+        for c in data.get("chunks", [])
+    ]
 
 
 # ─── FAISS Index Management ───────────────────────────────────────────────────

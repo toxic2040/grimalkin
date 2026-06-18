@@ -41,7 +41,7 @@ log = logging.getLogger("grimalkin")
 # Constants
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-VERSION = "5.0.2"
+VERSION = "5.0.3"
 
 HUNTING_GROUNDS = Path.home() / "Downloads"
 

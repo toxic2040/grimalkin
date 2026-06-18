@@ -2,6 +2,37 @@
 
 ---
 
+## v5.0.3 — Ingestion Isolation & Dependency Refresh
+
+### Security
+
+| Fix | Detail |
+|-----|--------|
+| Isolated document parsing | Files are now parsed in a separate worker process (`grimalkin_parse.py`) with an address-space cap (`RLIMIT_AS`), a CPU-time cap, and a wall-clock timeout. A hostile or malformed file can no longer hang or exhaust the main process; on any failure ingestion returns no chunks. |
+| Ingestion gate | Unsupported file types and files over `GRIM_MAX_INGEST_MB` (default 25 MB) are rejected before any parser runs. |
+| Dependency refresh | Regenerated the hash-pinned lock and raised security floors, moving `pypdf` (10 CVEs), `lxml`, `starlette`, `python-multipart`, `langchain-core`, `langchain-text-splitters`, `langsmith`, `urllib3`, `idna`, and `aiohttp` past known advisories. |
+| Install policy | `requirements-lock.txt` is now the canonical hash-verified install set; added `SECURITY.md` with the parser CVE-watch list and lock-refresh procedure. |
+
+### Config
+
+| Variable | Default | Detail |
+|----------|---------|--------|
+| `GRIM_MAX_INGEST_MB` | 25 | Max file size accepted for parsing |
+| `GRIM_PARSE_TIMEOUT` | 60 | Wall-clock seconds per file in the parse worker |
+| `GRIM_PARSE_MEM_MB` | 1024 | Address-space cap for the parse worker |
+
+### Tests
+
+| Change | Detail |
+|--------|--------|
+| Ingestion tests | Added coverage for the size/type gate, the worker JSON contract on a real file, and fail-closed behaviour under a memory cap too small to parse |
+
+### Known residual
+
+- `gradio` 6.12.0 carries PYSEC-2026-211 (weak hash in the local Audio cache key handler). No fixed release exists yet; the local-only, high-complexity issue is mitigated by the loopback-default bind and the auth token required on network binds. Tracked in `SECURITY.md`.
+
+---
+
 ## v5.0.2 — Security Hardening
 
 ### Security

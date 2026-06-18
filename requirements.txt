@@ -1,11 +1,25 @@
-gradio>=5.0
+# Direct dependencies. Floors are minimum *safe* versions; the exact, hashed
+# install set lives in requirements-lock.txt (regenerate with pip-compile).
+gradio>=6.12
 faiss-cpu
-langchain-text-splitters
+langchain-text-splitters>=1.1.2
 langchain-community
 langchain-ollama
 numpy
 requests
 plotly
-pypdf
+pypdf>=6.13.0
 python-docx
 unstructured
+
+# Security floors on transitive packages — these are pulled in by the deps
+# above, but old releases carry known CVEs (see SECURITY.md). Pinning the floor
+# here forces the resolver past the vulnerable versions.
+langchain-core>=1.3.3
+langsmith>=0.8.0
+lxml>=6.1.0
+starlette>=1.3.1
+python-multipart>=0.0.31
+urllib3>=2.7.0
+idna>=3.15
+aiohttp>=3.14.1
