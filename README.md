@@ -11,9 +11,17 @@
 
 ---
 
-**~5200 LOC · 100% offline · Ollama + FAISS + Knowledge Graph**
+**~5200 LOC · 100% offline · Ollama + FAISS + Knowledge Graph + Local Voice**
 
 Grimalkin is a local AI familiar that sorts your files, indexes them for instant Q&A, builds a knowledge graph of everything it finds, and develops a personality that sharpens the longer you spend together. No cloud, no API keys, no network tracking. One database, one bond, one cat.
+
+## Latest: v5.0.1
+
+**Privacy Control Deck** shows the live local posture: Ollama endpoint, voice adapter readiness, plaintext memory footprint, metadata-only audit trail, file access mode, and git source state.
+
+**Local voice dock templates** wire Scratch Post to local STT/TTS commands. The repo-local adapter detects Whisper/Vosk for transcription and Piper/espeak/flite/spd-say for speech, with browser microphone temp files discarded by default.
+
+**Qwen3 local path** adds `/no_think` handling and visible think-artifact cleanup for Qwen3-family Ollama models.
 
 ## What It Does
 
@@ -40,7 +48,7 @@ Grimalkin is a local AI familiar that sorts your files, indexes them for instant
 | Component | Role |
 |-----------|------|
 | Python 3.10+ | Runtime |
-| [Ollama](https://ollama.com) | Local LLM inference (qwen2.5:14b) |
+| [Ollama](https://ollama.com) | Local LLM inference (qwen3:8b by default, configurable) |
 | FAISS | Vector similarity search |
 | LangChain + langchain-ollama | Document loading, text splitting, chat integration |
 | Gradio 6.x | Web UI |
@@ -54,7 +62,7 @@ Grimalkin is a local AI familiar that sorts your files, indexes them for instant
 Download from [ollama.com](https://ollama.com), then pull the models:
 
 ```bash
-ollama pull qwen2.5:14b          # reasoning model
+ollama pull qwen3:8b             # reasoning model
 ollama pull nomic-embed-text     # embedding model
 ```
 
@@ -64,6 +72,7 @@ ollama pull nomic-embed-text     # embedding model
 git clone https://github.com/toxic2040/grimalkin.git
 cd grimalkin
 pip install -r requirements.txt
+cp .env.example .env
 ```
 
 ### 3. Run
@@ -170,8 +179,8 @@ grimalkin/
 ## Requirements
 
 - Python 3.10+
-- Ollama running locally with `qwen2.5:14b` and `nomic-embed-text`
-- ~16 GB RAM recommended (for the 14B model)
+- Ollama running locally with `qwen3:8b` and `nomic-embed-text`
+- ~8 GB RAM recommended for `qwen3:8b`; larger local models need more
 - Works on Linux, macOS, Windows (tested on Pop!_OS)
 
 ## License
