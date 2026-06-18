@@ -36,7 +36,6 @@ Zero behavior change on day one. Same Ollama endpoint, same FAISS index, same re
 
 import logging
 import time
-from pathlib import Path
 
 from grimalkin_interfaces import (
     # Core types
@@ -233,11 +232,12 @@ def ollama_chat(
     last_err = None
     for attempt in range(3):
         try:
-            _do_request = lambda: req.post(
-                f"{cfg.ollama_url}/v1/chat/completions",
-                json=payload,
-                timeout=cfg.inference_timeout,
-            )
+            def _do_request():
+                return req.post(
+                    f"{cfg.ollama_url}/v1/chat/completions",
+                    json=payload,
+                    timeout=cfg.inference_timeout,
+                )
 
             if lock is not None:
                 with lock:

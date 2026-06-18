@@ -19,7 +19,7 @@ import logging
 import re
 import shutil
 import sqlite3
-from datetime import datetime, timezone, date
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -30,8 +30,7 @@ from langchain_community.document_loaders import (
 )
 
 from grimalkin_interfaces import (
-    GrimalkinConfig, AppContext, LLMBackend, MemoryStore,
-    FeedbackStore, ChunkRecord,
+    GrimalkinConfig, AppContext, LLMBackend, ChunkRecord,
 )
 
 log = logging.getLogger("grimalkin")
@@ -350,10 +349,14 @@ def increment_bond(db, amount: int = 1) -> int:
 
 
 def bond_title(level: int) -> str:
-    if level < 20:  return "Stranger"
-    if level < 40:  return "Acquaintance"
-    if level < 60:  return "Resident"
-    if level < 80:  return "Companion"
+    if level < 20:
+        return "Stranger"
+    if level < 40:
+        return "Acquaintance"
+    if level < 60:
+        return "Resident"
+    if level < 80:
+        return "Companion"
     return "Bonded"
 
 

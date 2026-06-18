@@ -24,7 +24,7 @@ from abc import ABC, abstractmethod
 from collections import namedtuple
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -525,7 +525,7 @@ class FeedbackStore:
         self.db.commit()
         log.info(f"Correction recorded for task_type={task_type}")
 
-    def get_relevant(self, task_type: str, query: str, limit: int = 3) -> list[dict]:
+    def get_relevant(self, task_type: str, query: str = "", limit: int = 3) -> list[dict]:
         """
         Retrieve past corrections relevant to current task.
         Inject these into the system prompt so the model doesn't repeat mistakes.
@@ -544,7 +544,7 @@ class FeedbackStore:
         results = [{"query": r[0], "correction": r[1]} for r in cur.fetchall()]
         return results
 
-    def build_correction_context(self, task_type: str, query: str) -> str:
+    def build_correction_context(self, task_type: str, query: str = "") -> str:
         """
         Returns a string to prepend to the system prompt.
         Empty string if no relevant corrections exist.
