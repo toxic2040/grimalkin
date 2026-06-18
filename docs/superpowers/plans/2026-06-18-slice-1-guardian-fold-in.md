@@ -244,8 +244,16 @@ git remote add guardian-src ../familiar          # local path remote
 git fetch guardian-src
 git subtree add --prefix=guardian --squash guardian-src master
 git remote remove guardian-src                   # the remote was only needed for the import
+# Prune the guardian's internal dev docs from the PUBLIC tree: the superpowers
+# plans/specs are verbose internal-process artifacts that reference the removed
+# rustables and use agentic-process language, and the operating guide is tied to
+# pre-rename paths/binaries (renamed in Slice 6). They stay in the retained
+# familiar repo as provenance (see guardian/PROVENANCE.md, Task 4). grimalkin
+# documents the guardian in its own README/docs going forward.
+git rm -r guardian/docs
+git commit -m "Drop the guardian's internal dev docs from the public tree (provenance retained)"
 ```
-Expected: a new `guardian/` directory containing the Rust workspace (`crates/`, `Cargo.toml`, `systemd/`, `scripts/`, `docs/`, `LICENSE`), and one squashed merge commit on `guardian-integration`.
+Expected: `guardian/` contains the Rust workspace (`crates/`, `Cargo.toml`, `systemd/`, `scripts/`, `LICENSE`) and NO `docs/`; one squashed import commit plus the docs-prune commit on `guardian-integration`.
 
 - [ ] **Step 3: Ignore the Rust build output**
 
@@ -340,8 +348,11 @@ Update the top-of-README one-liner/badges so the MIT + "companion and guardian" 
 
 Run, from `repos/grimalkin`:
 ```bash
-# 1. Uniformly MIT, no copyleft, no rustables anywhere in the guardian:
-grep -rniE 'agpl|affero|rustables' guardian --include='*.rs' --include='*.toml' --include='*.md' | grep -v 'guardian/target'; echo "copyleft-grep-exit:$?"   # expect exit 1 (none)
+# 1. Uniformly MIT, no copyleft, no rustables in the guardian's CODE/CONFIG:
+#    (scope to source + manifests + lockfile — that is the license-relevant surface.
+#     guardian/PROVENANCE.md prose legitimately explains that rustables/AGPL were
+#     removed, so .md prose is intentionally NOT grepped here.)
+grep -rniE 'agpl|affero|rustables' guardian --include='*.rs' --include='*.toml' --include='Cargo.lock' | grep -v 'guardian/target'; echo "copyleft-grep-exit:$?"   # expect exit 1 (none)
 grep -n '"MIT"' guardian/Cargo.toml                                  # expect the workspace license = "MIT"
 test -f guardian/LICENSE && head -1 guardian/LICENSE                  # expect "MIT License"
 # 2. Guardian builds + tests + lint clean in-place:
