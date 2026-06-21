@@ -7,8 +7,8 @@ use familiar_platform::{ActuationError, ActuationOutcome, Actuators};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
-/// The Linux actuator. `new` creates the dedicated nft table once; `apply`
-/// installs a block or freezes a process; `reverse_all` removes every block.
+/// The Linux actuator. `apply` installs a block or freezes a process;
+/// `reverse_all` removes every block.
 pub struct LinuxActuators {
     freezer: cgroup::Freezer,
     active_blocks: Vec<(Ipv4Addr, u16)>,
@@ -16,7 +16,6 @@ pub struct LinuxActuators {
 
 impl LinuxActuators {
     pub fn new(cgroup_root: impl Into<PathBuf>) -> Result<Self, ActuationError> {
-        nft::ensure_table().map_err(|e| ActuationError::Failed(e.to_string()))?;
         Ok(Self {
             freezer: cgroup::Freezer::new(cgroup_root),
             active_blocks: Vec::new(),
@@ -47,6 +46,7 @@ impl Actuators for LinuxActuators {
                 let ip: Ipv4Addr = dst_ip.parse().map_err(|_| {
                     ActuationError::Failed(format!("non-IPv4 dst {dst_ip} (v0.1 is IPv4-only)"))
                 })?;
+                nft::ensure_table().map_err(|e| ActuationError::Failed(e.to_string()))?;
                 let note = nft::block_outbound(ip, *dst_port)
                     .map_err(|e| ActuationError::Failed(e.to_string()))?;
                 self.active_blocks.push((ip, *dst_port));
@@ -87,5 +87,12 @@ impl Actuators for LinuxActuators {
                 })
             }
         }
+    }
+
+    fn reverse_all(&mut self) -> Result<ActuationOutcome, ActuationError> {
+        LinuxActuators::reverse_all(self)?;
+        Ok(ActuationOutcome {
+            note: "flushed all outbound blocks".into(),
+        })
     }
 }

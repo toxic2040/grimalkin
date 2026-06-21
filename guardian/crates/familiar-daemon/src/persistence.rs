@@ -5,9 +5,17 @@
 //! no core change is needed.
 use familiar_core::audit::{AuditKind, AuditLog, AuditRecord};
 use familiar_core::capabilities::{CapabilityRegistry, CapabilitySnapshot};
+use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
+
+/// Persisted daemon posture. Missing or corrupt state is disarmed: fail closed
+/// toward no sensing, no containment, and no background kernel footprint.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuardianState {
+    pub armed: bool,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum PersistError {
@@ -39,6 +47,25 @@ pub fn load_capabilities(dir: &Path) -> CapabilityRegistry {
         Some(snap) => CapabilityRegistry::restore(snap),
         None => CapabilityRegistry::new(),
     }
+}
+
+pub fn save_guardian_state(dir: &Path, state: &GuardianState) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let tmp = dir.join("guardian-state.json.tmp");
+    fs::write(
+        &tmp,
+        serde_json::to_vec_pretty(state).expect("state serializes"),
+    )?;
+    fs::rename(tmp, dir.join("guardian-state.json"))
+}
+
+/// Fail-closed: any problem reading/parsing yields disarmed.
+pub fn load_guardian_state(dir: &Path) -> GuardianState {
+    let path = dir.join("guardian-state.json");
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<GuardianState>(&t).ok())
+        .unwrap_or_default()
 }
 
 pub fn append_audit(dir: &Path, rec: &AuditRecord) -> io::Result<()> {
@@ -142,6 +169,19 @@ mod tests {
         for id in CapabilityId::ALL {
             assert!(!fresh.is_enabled(id));
         }
+    }
+
+    #[test]
+    fn guardian_state_persists_and_fails_disarmed() {
+        let dir = tempdir(20);
+        assert!(!load_guardian_state(&dir).armed);
+
+        let state = GuardianState { armed: true };
+        save_guardian_state(&dir, &state).unwrap();
+        assert!(load_guardian_state(&dir).armed);
+
+        std::fs::write(dir.join("guardian-state.json"), "{not json").unwrap();
+        assert!(!load_guardian_state(&dir).armed);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use familiar_linux::wire::FileReadEvent;
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixListener;
 use std::path::Path;
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::{self, JoinHandle};
 
 /// Bind the helper socket, accept helper connections, and stream their
@@ -15,6 +15,17 @@ use std::thread::{self, JoinHandle};
 pub fn spawn_socket_source(
     socket: &Path,
 ) -> std::io::Result<(Receiver<FileReadEvent>, JoinHandle<()>)> {
+    let (tx, rx) = channel();
+    let handle = spawn_socket_source_to(socket, tx)?;
+    Ok((rx, handle))
+}
+
+/// Bind the helper socket using a caller-supplied channel. This lets the daemon
+/// build its supervisor while deferring the actual sensor socket until armed.
+pub fn spawn_socket_source_to(
+    socket: &Path,
+    tx: Sender<FileReadEvent>,
+) -> std::io::Result<JoinHandle<()>> {
     if socket.exists() {
         let _ = std::fs::remove_file(socket);
     }
@@ -22,7 +33,6 @@ pub fn spawn_socket_source(
         std::fs::create_dir_all(parent)?;
     }
     let listener = UnixListener::bind(socket)?;
-    let (tx, rx) = channel();
     let handle = thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             // F8: the only legitimate client is the CAP_SYS_ADMIN helper (root).
@@ -52,5 +62,5 @@ pub fn spawn_socket_source(
             }
         }
     });
-    Ok((rx, handle))
+    Ok(handle)
 }

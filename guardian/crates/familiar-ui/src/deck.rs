@@ -11,6 +11,9 @@ pub struct DeckModel {
 }
 
 impl DeckModel {
+    pub fn set_armed(&self, armed: bool) -> ControlRequest {
+        ControlRequest::SetArmed { armed }
+    }
     pub fn toggle(&self, id: CapabilityId, enabled: bool) -> ControlRequest {
         ControlRequest::SetCapability { id, enabled }
     }
@@ -32,6 +35,7 @@ mod tests {
     #[test]
     fn gestures_map_to_the_narrow_requests() {
         let m = DeckModel::default();
+        assert_eq!(m.set_armed(true), ControlRequest::SetArmed { armed: true });
         assert_eq!(
             m.toggle(CapabilityId::DetectorExfil, true),
             ControlRequest::SetCapability {

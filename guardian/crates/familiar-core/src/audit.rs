@@ -6,6 +6,7 @@ use std::fmt::Write as _;
 /// The kind of transition recorded in the audit log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuditKind {
+    GuardianState,
     CapabilityToggled,
     Detection,
     Decision,

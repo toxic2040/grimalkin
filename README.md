@@ -67,9 +67,20 @@ ambiguous. The security guarantees live in a small, deterministic, memory-safe
 harness, not in a model.
 
 The guardian is **off until you turn it on** and is Linux-only (it uses NFQUEUE,
-nftables, cgroup-v2, and fanotify). It lives under `guardian/` and is built
-separately (`cd guardian && cargo build --release`). The companion drives it
-over a local Unix socket; wiring the Control Deck to it is the next slice.
+nftables, cgroup-v2, and fanotify). It persists a master armed/disarmed switch
+and defaults to disarmed; in that state the daemon does not install the NFQUEUE
+divert rule or bind the file-read helper socket. The Unix-socket protocol
+exposes the master switch, capability toggles, prompts, active blocks, sensor
+health, and the hash-chained audit tail. The standalone guardian deck can drive
+that protocol now; wiring grimalkin's Gradio Control Deck to it remains a later
+integration slice.
+
+It lives under `guardian/` and is built separately:
+
+```bash
+cd guardian
+cargo build --release
+```
 
 The whole project — companion and guardian — is MIT licensed.
 

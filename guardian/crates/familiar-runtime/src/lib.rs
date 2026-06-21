@@ -86,6 +86,12 @@ where
         }
     }
 
+    /// An idle control tick: expire pending requests without polling sensors.
+    /// The daemon uses this while disarmed.
+    pub fn drive_idle(&mut self, now: Timestamp) {
+        self.sweep_expired(now);
+    }
+
     /// Resolve a pending request by explicit human decision. A grant acts; a
     /// denial records no-action.
     pub fn resolve_permission(&mut self, id: RequestId, granted: bool, now: Timestamp) {
@@ -182,6 +188,34 @@ where
                 );
                 self.notifier
                     .notify(&format!("Could not lift containment: {e}"));
+                Err(())
+            }
+        }
+    }
+
+    /// Lift every containment the platform adapter can track. This is used by
+    /// the master disarm path and can only reduce containment.
+    #[allow(clippy::result_unit_err)]
+    pub fn reverse_all_containment(&mut self, now: Timestamp) -> Result<(), ()> {
+        match self.actuators.reverse_all() {
+            Ok(outcome) => {
+                self.audit.append(
+                    now,
+                    AuditKind::Actuation,
+                    format!("reversed all containment: {}", outcome.note),
+                );
+                self.notifier
+                    .notify(&format!("Lifted all containment ({})", outcome.note));
+                Ok(())
+            }
+            Err(e) => {
+                self.audit.append(
+                    now,
+                    AuditKind::NoAction,
+                    format!("reverse all containment failed: {e}"),
+                );
+                self.notifier
+                    .notify(&format!("Could not lift all containment: {e}"));
                 Err(())
             }
         }

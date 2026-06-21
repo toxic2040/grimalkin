@@ -2,6 +2,8 @@ use familiar_core::capabilities::CapabilityId;
 use familiar_core::events::{Event, ProcessRef};
 use familiar_daemon::config::DaemonConfig;
 use familiar_daemon::control::apply_command;
+use familiar_daemon::persistence::GuardianState;
+use familiar_daemon::run::SensorHealth;
 use familiar_daemon::run::build_supervisor_with_sensors;
 use familiar_ipc::{ControlRequest, ControlResponse};
 use std::process::Command;
@@ -94,6 +96,13 @@ fn arm(state_dir: &std::path::Path) {
     familiar_daemon::persistence::save_capabilities(state_dir, &reg.snapshot()).unwrap();
 }
 
+fn health() -> SensorHealth {
+    SensorHealth {
+        network_ok: true,
+        file_ok: true,
+    }
+}
+
 /// One unlinked outbound (confidence 50 => ask) on the first poll, then nothing.
 struct OneOutbound(std::cell::Cell<bool>);
 impl familiar_platform::Sensors for OneOutbound {
@@ -142,17 +151,16 @@ fn answer_prompt_grant_installs_the_block_via_ipc() {
         return;
     }
     let (cfg, mut sup) = armed_sup("grant");
+    let mut state = GuardianState { armed: true };
     sup.drive_once(2000);
     // A prompt is now open; status shows it.
     let status = apply_command(
         &mut sup,
         &cfg,
+        &mut state,
         ControlRequest::GetStatus,
         2000,
-        familiar_daemon::run::SensorHealth {
-            network_ok: true,
-            file_ok: true,
-        },
+        health(),
     );
     let id = match status {
         ControlResponse::Status(s) => {
@@ -165,12 +173,10 @@ fn answer_prompt_grant_installs_the_block_via_ipc() {
     let r = apply_command(
         &mut sup,
         &cfg,
+        &mut state,
         ControlRequest::AnswerPrompt { id, granted: true },
         2500,
-        familiar_daemon::run::SensorHealth {
-            network_ok: true,
-            file_ok: true,
-        },
+        health(),
     );
     assert_eq!(r, ControlResponse::Ok);
     assert!(ruleset().contains("drop"), "grant installs the block");
@@ -182,16 +188,15 @@ fn unblock_via_ipc_lifts_the_block() {
         return;
     }
     let (cfg, mut sup) = armed_sup("unblock");
+    let mut state = GuardianState { armed: true };
     sup.drive_once(2000);
     let status = apply_command(
         &mut sup,
         &cfg,
+        &mut state,
         ControlRequest::GetStatus,
         2000,
-        familiar_daemon::run::SensorHealth {
-            network_ok: true,
-            file_ok: true,
-        },
+        health(),
     );
     let id = match status {
         ControlResponse::Status(s) => s.prompts[0].id,
@@ -200,26 +205,22 @@ fn unblock_via_ipc_lifts_the_block() {
     apply_command(
         &mut sup,
         &cfg,
+        &mut state,
         ControlRequest::AnswerPrompt { id, granted: true },
         2500,
-        familiar_daemon::run::SensorHealth {
-            network_ok: true,
-            file_ok: true,
-        },
+        health(),
     );
     assert!(ruleset().contains("drop"));
     let r = apply_command(
         &mut sup,
         &cfg,
+        &mut state,
         ControlRequest::Unblock {
             dst_ip: "203.0.113.9".into(),
             dst_port: 443,
         },
         2600,
-        familiar_daemon::run::SensorHealth {
-            network_ok: true,
-            file_ok: true,
-        },
+        health(),
     );
     assert_eq!(r, ControlResponse::Ok);
     assert!(!ruleset().contains("drop"), "unblock lifts containment");
@@ -231,23 +232,107 @@ fn set_capability_toggles_and_persists() {
         return;
     }
     let (cfg, mut sup) = armed_sup("toggle");
+    let mut state = GuardianState { armed: true };
     let r = apply_command(
         &mut sup,
         &cfg,
+        &mut state,
         ControlRequest::SetCapability {
             id: CapabilityId::ActuatorFreezeProcess,
             enabled: true,
         },
         100,
-        familiar_daemon::run::SensorHealth {
-            network_ok: true,
-            file_ok: true,
-        },
+        health(),
     );
     assert_eq!(r, ControlResponse::Ok);
     // Persisted to capabilities.json: a fresh load sees it on.
     let reloaded = familiar_daemon::persistence::load_capabilities(&cfg.state_dir);
     assert!(reloaded.is_enabled(CapabilityId::ActuatorFreezeProcess));
+}
+
+#[test]
+fn status_reports_disarmed_by_default() {
+    if reexec_in_netns("status_reports_disarmed_by_default") {
+        return;
+    }
+    let (cfg, mut sup) = armed_sup("status-disarmed");
+    let mut state = GuardianState::default();
+    let resp = apply_command(
+        &mut sup,
+        &cfg,
+        &mut state,
+        ControlRequest::GetStatus,
+        100,
+        health(),
+    );
+    match resp {
+        ControlResponse::Status(s) => assert!(!s.armed),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn set_armed_persists_and_audits_the_master_state() {
+    if reexec_in_netns("set_armed_persists_and_audits_the_master_state") {
+        return;
+    }
+    let (cfg, mut sup) = armed_sup("set-armed");
+    let mut state = GuardianState::default();
+    let resp = apply_command(
+        &mut sup,
+        &cfg,
+        &mut state,
+        ControlRequest::SetArmed { armed: true },
+        100,
+        health(),
+    );
+    assert_eq!(resp, ControlResponse::Ok);
+    assert!(state.armed);
+    assert!(familiar_daemon::persistence::load_guardian_state(&cfg.state_dir).armed);
+    assert!(sup.audit.records().iter().any(|r| {
+        r.kind == familiar_core::audit::AuditKind::GuardianState
+            && r.detail.contains("guardian -> armed")
+    }));
+}
+
+#[test]
+fn disarmed_grant_is_recorded_but_installs_no_block() {
+    if reexec_in_netns("disarmed_grant_is_recorded_but_installs_no_block") {
+        return;
+    }
+    let (cfg, mut sup) = armed_sup("disarmed-grant");
+    let mut state = GuardianState { armed: true };
+    sup.drive_once(2000);
+    let status = apply_command(
+        &mut sup,
+        &cfg,
+        &mut state,
+        ControlRequest::GetStatus,
+        2000,
+        health(),
+    );
+    let id = match status {
+        ControlResponse::Status(s) => s.prompts[0].id,
+        other => panic!("{other:?}"),
+    };
+    state.armed = false;
+    let resp = apply_command(
+        &mut sup,
+        &cfg,
+        &mut state,
+        ControlRequest::AnswerPrompt { id, granted: true },
+        2500,
+        health(),
+    );
+    assert_eq!(resp, ControlResponse::Ok);
+    assert!(
+        !ruleset().contains("drop"),
+        "disarmed grant must not actuate"
+    );
+    assert!(sup.audit.records().iter().any(|r| {
+        r.kind == familiar_core::audit::AuditKind::NoAction
+            && r.detail.contains("ignored: guardian is disarmed")
+    }));
 }
 
 /// The headline invariant: NO control command installs a block absent a real
@@ -259,17 +344,16 @@ fn no_command_can_install_containment() {
         return;
     }
     let (cfg, mut sup) = armed_sup("invariant");
+    let mut state = GuardianState { armed: true };
     // Drain the one scripted outbound by answering its prompt with a DENY.
     sup.drive_once(2000);
     let status = apply_command(
         &mut sup,
         &cfg,
+        &mut state,
         ControlRequest::GetStatus,
         2000,
-        familiar_daemon::run::SensorHealth {
-            network_ok: true,
-            file_ok: true,
-        },
+        health(),
     );
     let id = match status {
         ControlResponse::Status(s) => s.prompts[0].id,
@@ -278,12 +362,10 @@ fn no_command_can_install_containment() {
     apply_command(
         &mut sup,
         &cfg,
+        &mut state,
         ControlRequest::AnswerPrompt { id, granted: false },
         2100,
-        familiar_daemon::run::SensorHealth {
-            network_ok: true,
-            file_ok: true,
-        },
+        health(),
     );
     assert!(!ruleset().contains("drop"), "deny installs nothing");
     // Now hammer every other command; none may contain.
@@ -295,21 +377,14 @@ fn no_command_can_install_containment() {
             id: CapabilityId::ActuatorBlockConn,
             enabled: true,
         },
+        ControlRequest::SetArmed { armed: true },
+        ControlRequest::SetArmed { armed: false },
         ControlRequest::Unblock {
             dst_ip: "203.0.113.9".into(),
             dst_port: 443,
         }, // nothing to remove
     ] {
-        let _ = apply_command(
-            &mut sup,
-            &cfg,
-            cmd,
-            3000,
-            familiar_daemon::run::SensorHealth {
-                network_ok: true,
-                file_ok: true,
-            },
-        );
+        let _ = apply_command(&mut sup, &cfg, &mut state, cmd, 3000, health());
         assert!(
             !ruleset().contains("drop"),
             "no non-grant command may install a block"

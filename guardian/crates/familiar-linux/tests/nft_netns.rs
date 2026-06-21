@@ -114,7 +114,8 @@ fn reverse_all_clears_blocks_but_keeps_the_sense_chain() {
         .unwrap()
     };
 
-    let mut act = LinuxActuators::new("/sys/fs/cgroup").expect("actuators"); // ensures the table
+    let mut act = LinuxActuators::new("/sys/fs/cgroup").expect("actuators");
+    nft::ensure_table().expect("table");
     nft::install_queue_rule(0).expect("sense chain"); // the NFQUEUE divert lives in the same table
     act.apply(&ProposedAction::BlockOutbound {
         process: ProcessRef {

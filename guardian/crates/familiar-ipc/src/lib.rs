@@ -39,6 +39,8 @@ pub enum ControlRequest {
     ListCapabilities,
     /// Toggle a capability at runtime (persisted by the daemon).
     SetCapability { id: CapabilityId, enabled: bool },
+    /// Master opt-in. Disarmed is dormant and cannot grant new actions.
+    SetArmed { armed: bool },
     /// Answer an open permission prompt. `granted == false` denies.
     AnswerPrompt { id: u64, granted: bool },
     /// Lift containment for a destination (remove the nft DROP rule).
@@ -82,6 +84,8 @@ pub struct BlockDto {
 /// The compact live status the deck polls.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusSnapshot {
+    /// Master opt-in. Disarmed is the default.
+    pub armed: bool,
     pub capabilities: CapabilitySnapshot,
     pub prompts: Vec<PromptDto>,
     pub active_blocks: Vec<BlockDto>,
@@ -129,6 +133,7 @@ mod tests {
                 id: CapabilityId::DetectorExfil,
                 enabled: true,
             },
+            ControlRequest::SetArmed { armed: true },
             ControlRequest::AnswerPrompt {
                 id: 3,
                 granted: false,
@@ -179,6 +184,7 @@ mod tests {
     #[test]
     fn status_response_round_trips_through_json() {
         let snap = StatusSnapshot {
+            armed: true,
             capabilities: CapabilitySnapshot {
                 states: Default::default(),
             },

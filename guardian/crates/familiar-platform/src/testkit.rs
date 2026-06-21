@@ -70,6 +70,17 @@ impl Actuators for RecordingActuators {
             note: format!("reversed {action:?}"),
         })
     }
+
+    fn reverse_all(&mut self) -> Result<ActuationOutcome, ActuationError> {
+        if self.fail {
+            return Err(ActuationError::Failed("injected".into()));
+        }
+        self.reversed.extend(self.applied.iter().cloned());
+        self.applied.clear();
+        Ok(ActuationOutcome {
+            note: "reversed all".into(),
+        })
+    }
 }
 
 #[cfg(test)]

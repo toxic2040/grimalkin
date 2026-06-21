@@ -4,7 +4,7 @@
 //! so the IPC can never install containment. The tick loop is the only caller
 //! that mutates the Supervisor; this function runs inside it.
 use crate::config::DaemonConfig;
-use crate::persistence;
+use crate::persistence::{self, GuardianState};
 use familiar_advisor::NullAdvisor;
 use familiar_core::permission::PermissionRequest;
 use familiar_core::policy::ProposedAction;
@@ -27,8 +27,13 @@ fn prompt_dto(r: &PermissionRequest) -> PromptDto {
     }
 }
 
-fn status<S: Sensors>(sup: &Sup<S>, health: crate::run::SensorHealth) -> StatusSnapshot {
+fn status<S: Sensors>(
+    sup: &Sup<S>,
+    state: GuardianState,
+    health: crate::run::SensorHealth,
+) -> StatusSnapshot {
     StatusSnapshot {
+        armed: state.armed,
         capabilities: sup.engine.registry().snapshot(),
         prompts: sup.ledger.open_requests().map(prompt_dto).collect(),
         active_blocks: sup
@@ -53,6 +58,7 @@ fn status<S: Sensors>(sup: &Sup<S>, health: crate::run::SensorHealth) -> StatusS
 pub fn apply_command<S: Sensors>(
     sup: &mut Sup<S>,
     cfg: &DaemonConfig,
+    state: &mut GuardianState,
     req: ControlRequest,
     now: u64,
     health: crate::run::SensorHealth,
@@ -70,8 +76,32 @@ pub fn apply_command<S: Sensors>(
                 Err(e) => ControlResponse::Error(format!("persist failed: {e}")),
             }
         }
+        ControlRequest::SetArmed { armed } => {
+            if state.armed == armed {
+                return ControlResponse::Ok;
+            }
+            state.armed = armed;
+            sup.audit.append(
+                now,
+                familiar_core::audit::AuditKind::GuardianState,
+                format!("guardian -> {}", if armed { "armed" } else { "disarmed" }),
+            );
+            match persistence::save_guardian_state(&cfg.state_dir, state) {
+                Ok(()) => ControlResponse::Ok,
+                Err(e) => ControlResponse::Error(format!("persist failed: {e}")),
+            }
+        }
         ControlRequest::AnswerPrompt { id, granted } => {
-            sup.resolve_permission(id, granted, now);
+            if granted && !state.armed {
+                sup.audit.append(
+                    now,
+                    familiar_core::audit::AuditKind::NoAction,
+                    format!("grant for request {id} ignored: guardian is disarmed"),
+                );
+                sup.resolve_permission(id, false, now);
+            } else {
+                sup.resolve_permission(id, granted, now);
+            }
             ControlResponse::Ok
         }
         ControlRequest::Unblock { dst_ip, dst_port } => {
@@ -89,7 +119,7 @@ pub fn apply_command<S: Sensors>(
                 Err(()) => ControlResponse::Error("unblock failed (see audit log)".into()),
             }
         }
-        ControlRequest::GetStatus => ControlResponse::Status(status(sup, health)),
+        ControlRequest::GetStatus => ControlResponse::Status(status(sup, *state, health)),
         ControlRequest::GetAudit { since_seq } => {
             let recs = sup
                 .audit

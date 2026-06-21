@@ -46,6 +46,12 @@ pub trait Actuators {
     fn reverse(&mut self, _action: &ProposedAction) -> Result<ActuationOutcome, ActuationError> {
         Err(ActuationError::Unsupported)
     }
+
+    /// Reverse every containment this adapter can track. Used by the master
+    /// disarm path; it can only reduce containment.
+    fn reverse_all(&mut self) -> Result<ActuationOutcome, ActuationError> {
+        Err(ActuationError::Unsupported)
+    }
 }
 
 /// Surfaces notifications and permission prompts to the user (the UI in the

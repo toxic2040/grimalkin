@@ -79,6 +79,20 @@ impl eframe::App for App {
         };
 
         ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Guardian").strong());
+            let mut armed = status.armed;
+            if ui.checkbox(&mut armed, "Armed").changed() {
+                self.pending.push(self.model.set_armed(armed));
+            }
+            if status.armed {
+                ui.colored_label(egui::Color32::GREEN, "active");
+            } else {
+                ui.weak("disarmed");
+            }
+        });
+
+        ui.separator();
         ui.label(egui::RichText::new("Capabilities").strong());
         for id in CapabilityId::ALL {
             let on = status
