@@ -154,6 +154,13 @@ fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
     Ok(cred.uid.as_raw())
 }
 
+fn harden_socket(socket: &Path, operator_uid: u32) -> io::Result<()> {
+    if rustix::process::getuid().as_raw() == 0 {
+        std::os::unix::fs::chown(socket, Some(operator_uid), None)?;
+    }
+    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))
+}
+
 /// Bind the control socket and accept operator connections. Each request line is
 /// parsed and forwarded — with a one-shot reply channel — to the tick loop over
 /// the returned receiver. The loop applies it and sends the response back, which
@@ -169,8 +176,9 @@ pub fn serve_control(
         std::fs::create_dir_all(parent)?;
     }
     let listener = UnixListener::bind(socket)?;
-    // Defense in depth: operator group + owner only. The uid check is authoritative.
-    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o660))?;
+    // The service runs as root, but the deck runs as the configured operator.
+    // Filesystem permissions keep everyone else out before the SO_PEERCRED check.
+    harden_socket(socket, operator_uid)?;
 
     let (tx, rx) = channel::<ControlEnvelope>();
     let handle = thread::spawn(move || {

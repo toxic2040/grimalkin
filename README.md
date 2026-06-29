@@ -15,7 +15,11 @@
 
 Grimalkin is two things: a local AI familiar that sorts your files, indexes them for instant Q&A, builds a knowledge graph of everything it finds, and develops a personality that sharpens the longer you spend together; and a privileged Rust guardian that watches for hostile activity and contains threats within a strict, auditable authority envelope. No cloud, no API keys, no network tracking. One database, one bond, one cat.
 
-## Latest: v5.0.2
+## Latest: v5.0.3
+
+**Ingestion isolation** parses documents in a capped worker process, rejects
+unsupported or oversized files before parsing, and keeps the hash-pinned
+dependency lock above the current security floors.
 
 **Security hardening** narrows Gradio file serving to avatar assets only, requires `GRIM_AUTH_TOKEN` for non-loopback binds, and escapes attacker-controlled filenames/entity names in Pyre/Loom HTML surfaces.
 

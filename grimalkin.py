@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Grimalkin v5.0.2 — Security Hardening
+Grimalkin v5.0.3 — Ingestion Isolation & Dependency Refresh
 =========================================
 
 A 100% local AI file-sorting familiar with persistent memory, FAISS-powered

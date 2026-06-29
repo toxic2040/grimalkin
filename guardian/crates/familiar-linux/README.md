@@ -8,17 +8,14 @@ testkit fakes do, so the deterministic core and the supervisor loop are unchange
 
 `familiar-platform` stays a dependency-free trait crate so the core's "compiles
 and tests with no platform adapter present" portability seam holds. All the OS
-machinery and the heavier dependencies (`nfq`, `rustables`, `libc`) live here.
+machinery and the heavier dependencies (`nfq`, `libc`) live here.
 
 ## Modules
 
 - `nft` — the dedicated `inet familiar` nftables table. `ensure_table` +
-  `block_outbound` install a reversible DROP rule over **netlink** via
-  `rustables`; `delete_table` reverses everything in one operation.
-  `install_queue_rule` adds the sense chain that diverts outbound TCP to NFQUEUE
-  — that one uses the `nft` binary, because rustables 0.8.7 cannot emit the nft
-  `queue` statement (it only has an immediate NF_QUEUE verdict the kernel
-  rejects). The hot-path block rule stays on netlink.
+  `block_outbound` install a reversible DROP rule through the `nft` userspace
+  binary; `delete_table` reverses everything in one operation. `install_queue_rule`
+  adds the sense chain that diverts outbound TCP to NFQUEUE.
 - `nfqueue` — the NFQUEUE reader (`nfq`, pure Rust). Senses only: it ACCEPTs
   every packet and forwards connection-opening SYNs. The SYN filter lives in the
   parser, so this is new-connection sensing, not per-packet noise.
@@ -38,12 +35,6 @@ This crate keeps `#![forbid(unsafe_code)]`. Every `unsafe` line in the whole
 workspace lives in the separate `familiar-fanotify-helper` binary, which holds
 `CAP_SYS_ADMIN` and does nothing but watch files and stream events. The daemon
 holds only `CAP_NET_ADMIN`.
-
-## Dependency note
-
-`rustables` is vendored and patched (`../../vendor/rustables-0.8.7-patched`): the
-published 0.8.7 double-closes a netlink fd and aborts on Rust 1.95. See
-`vendor/PATCH-NOTES.md`. The one-line fix should be upstreamed.
 
 ## Tests
 

@@ -28,6 +28,13 @@ fn serve_control_round_trips_a_request() {
     let me = rustix::process::getuid().as_raw();
 
     let (rx, _h) = serve_control(&sock, me).expect("serve");
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let meta = std::fs::metadata(&sock).expect("socket metadata");
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        assert_eq!(meta.uid(), me);
+    }
     // Stub "tick loop": answer one command then stop.
     let loop_h = std::thread::spawn(move || {
         if let Ok((req, reply)) = rx.recv() {
