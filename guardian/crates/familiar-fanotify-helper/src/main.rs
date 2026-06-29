@@ -22,7 +22,17 @@ struct FileReadEvent {
 }
 
 fn is_watched(path: &str, prefixes: &[String]) -> bool {
-    prefixes.iter().any(|p| path.starts_with(p.as_str()))
+    prefixes.iter().any(|p| path_within(p, path))
+}
+
+/// True when `path` is `prefix` itself or a descendant of it. Matches only at a
+/// path-component boundary, so "/h/.ssh" covers "/h/.ssh/id" but not the
+/// unrelated sibling "/h/.ssh_backup".
+fn path_within(prefix: &str, path: &str) -> bool {
+    match path.strip_prefix(prefix) {
+        Some(rest) => rest.is_empty() || rest.starts_with('/') || prefix.ends_with('/'),
+        None => false,
+    }
 }
 
 fn now_ms() -> u64 {
@@ -109,7 +119,14 @@ mod tests {
     #[test]
     fn matches_watched_prefix() {
         let prefixes = vec!["/home/u/.ssh".to_string(), "/etc/shadow".to_string()];
+        // Exact match and true descendants are watched.
+        assert!(is_watched("/home/u/.ssh", &prefixes));
         assert!(is_watched("/home/u/.ssh/id_ed25519", &prefixes));
+        assert!(is_watched("/etc/shadow", &prefixes));
+        // A sibling that merely shares a textual prefix must NOT match: the
+        // prefix only matches at a path-component boundary.
+        assert!(!is_watched("/home/u/.ssh_backup", &prefixes));
+        assert!(!is_watched("/home/u/.ssh_backup/id_ed25519", &prefixes));
         assert!(!is_watched("/home/u/Documents/notes.txt", &prefixes));
     }
 }

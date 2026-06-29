@@ -70,7 +70,7 @@ fn captures_a_real_outbound_syn_in_netns() {
     familiar_linux::nft::ensure_table().expect("create table");
     familiar_linux::nft::install_queue_rule(0).expect("install queue rule");
 
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = std::sync::mpsc::sync_channel(familiar_linux::nfqueue::SYN_CHANNEL_CAP);
     std::thread::spawn(move || {
         let _ = familiar_linux::nfqueue::run_reader(0, tx);
     });

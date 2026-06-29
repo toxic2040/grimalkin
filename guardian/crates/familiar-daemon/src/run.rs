@@ -10,7 +10,7 @@ use familiar_runtime::Supervisor;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::{Receiver, SyncSender, channel, sync_channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -41,7 +41,7 @@ fn now_ms() -> u64 {
 
 fn activate_sensing(
     cfg: &DaemonConfig,
-    syn_tx: Sender<OutboundSyn>,
+    syn_tx: SyncSender<OutboundSyn>,
     file_tx: Sender<FileReadEvent>,
     network_ok: Arc<AtomicBool>,
     file_ok: Arc<AtomicBool>,
@@ -120,7 +120,9 @@ pub fn build_supervisor_with_sensors<S: familiar_platform::Sensors>(
 /// The daemon's run loop. Spawns the NFQUEUE reader and the helper socket
 /// source, then ticks the Supervisor and persists any new audit records.
 pub fn main_loop(cfg: DaemonConfig) -> ! {
-    let (syn_tx, syn_rx) = channel::<OutboundSyn>();
+    // Bounded so a stalled supervisor can never grow memory; the reader drops
+    // (and counts) on full and keeps issuing Accept verdicts.
+    let (syn_tx, syn_rx) = sync_channel::<OutboundSyn>(nfqueue::SYN_CHANNEL_CAP);
     let (file_tx, file_rx) = channel::<FileReadEvent>();
     let network_ok = Arc::new(AtomicBool::new(false));
     let file_ok = Arc::new(AtomicBool::new(false));
