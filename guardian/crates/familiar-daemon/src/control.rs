@@ -53,6 +53,18 @@ fn status<S: Sensors>(
     }
 }
 
+fn root_required(req: &ControlRequest) -> bool {
+    match req {
+        ControlRequest::SetArmed { armed } => !*armed,
+        ControlRequest::SetCapability { enabled, .. } => !*enabled,
+        ControlRequest::AnswerPrompt { granted, .. } => *granted,
+        ControlRequest::Unblock { .. } => true,
+        ControlRequest::ListCapabilities
+        | ControlRequest::GetStatus
+        | ControlRequest::GetAudit { .. } => false,
+    }
+}
+
 /// Apply one control request. Pure side-effects on `sup` + persistence; returns
 /// the response to send back over the socket.
 pub fn apply_command<S: Sensors>(
@@ -63,6 +75,27 @@ pub fn apply_command<S: Sensors>(
     now: u64,
     health: crate::run::SensorHealth,
 ) -> ControlResponse {
+    apply_command_from(sup, cfg, state, 0, req, now, health)
+}
+
+/// Apply one control request from a concrete peer uid.
+pub fn apply_command_from<S: Sensors>(
+    sup: &mut Sup<S>,
+    cfg: &DaemonConfig,
+    state: &mut GuardianState,
+    peer_uid: u32,
+    req: ControlRequest,
+    now: u64,
+    health: crate::run::SensorHealth,
+) -> ControlResponse {
+    if peer_uid != 0 && root_required(&req) {
+        sup.audit.append(
+            now,
+            familiar_core::audit::AuditKind::NoAction,
+            format!("control request rejected: root required for {req:?}"),
+        );
+        return ControlResponse::Error("root required for privileged guardian control".into());
+    }
     match req {
         ControlRequest::ListCapabilities => {
             ControlResponse::Capabilities(sup.engine.registry().snapshot())
@@ -141,7 +174,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::{self, JoinHandle};
 
 /// A control request paired with the one-shot channel to answer it.
-pub type ControlEnvelope = (ControlRequest, Sender<ControlResponse>);
+pub type ControlEnvelope = (u32, ControlRequest, Sender<ControlResponse>);
 
 /// Only the configured operator uid, or root, may drive the deck.
 pub fn authorized(peer_uid: u32, operator_uid: u32) -> bool {
@@ -184,7 +217,11 @@ pub fn serve_control(
     let handle = thread::spawn(move || {
         for conn in listener.incoming().flatten() {
             match peer_uid(&conn) {
-                Ok(uid) if authorized(uid, operator_uid) => {}
+                Ok(uid) if authorized(uid, operator_uid) => {
+                    if handle_conn(conn, uid, &tx).is_err() {
+                        // client gone; accept the next one
+                    }
+                }
                 Ok(uid) => {
                     eprintln!("[familiar] control: rejecting uid {uid} (operator {operator_uid})");
                     continue;
@@ -194,15 +231,12 @@ pub fn serve_control(
                     continue;
                 }
             }
-            if handle_conn(conn, &tx).is_err() {
-                // client gone; accept the next one
-            }
         }
     });
     Ok((rx, handle))
 }
 
-fn handle_conn(conn: UnixStream, tx: &Sender<ControlEnvelope>) -> io::Result<()> {
+fn handle_conn(conn: UnixStream, peer_uid: u32, tx: &Sender<ControlEnvelope>) -> io::Result<()> {
     let mut reader = std::io::BufReader::new(conn.try_clone()?);
     let mut writer = conn;
     loop {
@@ -211,7 +245,7 @@ fn handle_conn(conn: UnixStream, tx: &Sender<ControlEnvelope>) -> io::Result<()>
             Err(_) => return Ok(()), // EOF / parse error closes the connection
         };
         let (reply_tx, reply_rx) = channel::<ControlResponse>();
-        if tx.send((req, reply_tx)).is_err() {
+        if tx.send((peer_uid, req, reply_tx)).is_err() {
             return Ok(()); // daemon gone
         }
         let resp = reply_rx

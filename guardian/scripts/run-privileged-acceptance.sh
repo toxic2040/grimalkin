@@ -9,7 +9,7 @@
 # daemon + helper + a scripted exfil in a netns and asserts an autonomous drop
 # rule was installed and the audit recorded Detection + Actuation. This one run
 # exercises the whole stack: fanotify (helper, CAP_SYS_ADMIN), NFQUEUE sensing,
-# /proc attribution, read→outbound linking, and the reversible netlink block.
+# /proc attribution, read→outbound linking, and the reversible nftables block.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO=$PWD

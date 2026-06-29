@@ -236,11 +236,12 @@ pub fn main_loop(cfg: DaemonConfig) -> ! {
             file_alerted = true;
         }
         // Apply any queued control commands (single-owner: only this loop mutates sup).
-        while let Ok((req, reply)) = ctl_rx.try_recv() {
-            let resp = crate::control::apply_command(
+        while let Ok((peer_uid, req, reply)) = ctl_rx.try_recv() {
+            let resp = crate::control::apply_command_from(
                 &mut sup,
                 &cfg,
                 &mut guardian_state,
+                peer_uid,
                 req,
                 now,
                 health,

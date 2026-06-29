@@ -53,6 +53,9 @@ impl Actuators for LinuxActuators {
                 Ok(ActuationOutcome { note })
             }
             ProposedAction::FreezeProcess { pid } => {
+                // Tracking gap before any detector proposes FreezeProcess: keep
+                // active-freeze handles so disarm can thaw them, and revalidate
+                // process identity before freezing to close pid-reuse races.
                 let handle = self
                     .freezer
                     .freeze(*pid)

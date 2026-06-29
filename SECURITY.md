@@ -41,6 +41,45 @@ Two guards apply:
 Isolation reduces blast radius but is not a substitute for patched parsers. Keep
 the dependencies current.
 
+## Guardian threat model
+
+The Rust guardian is an optional local Linux component. It is not a remote
+service. Its security boundary is the local machine account model plus Linux
+capabilities:
+
+- `familiar-daemon` owns the supervisor, audit chain, nftables rules, and cgroup
+  freezer. It runs as uid 0 with a bounded capability set because nftables and
+  cgroup containment need elevated kernel authority.
+- `familiar-fanotify-helper` is the only component with `CAP_SYS_ADMIN`. It does
+  not decide policy or install containment; it only streams file-read events to
+  the daemon over a Unix socket.
+- The control deck talks to the daemon over a newline-delimited JSON Unix socket.
+  The socket is owned by the configured operator uid and mode `0600`; the daemon
+  also verifies peer credentials with `SO_PEERCRED`.
+
+Control authority is split by effect. The configured operator uid may read
+status/audit state, arm the guardian, enable capabilities, and deny prompts.
+Root is required to lower protection or grant actuation: disarm, disable a
+capability, grant a prompt, or unblock a contained destination. This is deliberate
+for the public build: malware already running as the desktop user should not be
+able to switch the guardian off through the sanctioned IPC path.
+
+This boundary does not claim to defeat a fully compromised root account or a
+kernel-level attacker. Same-uid malware can still read files the user can read,
+interfere with unprivileged UI processes, or abuse the Python/Gradio surface if
+the UI is exposed beyond loopback. The guardian's job is narrower: detect and
+contain selected local exfiltration behavior, make control decisions auditable,
+and keep broad kernel privileges out of the Python companion.
+
+Current v0.1 limits:
+
+- Network sensing and blocking are IPv4/TCP only.
+- `FreezeProcess` is present as an actuator but no v0.1 detector proposes it.
+  Before it is enabled, disarm needs active-freeze tracking and the freeze path
+  needs process-identity revalidation to avoid pid-reuse races.
+- The control and helper protocols cap each JSON line, but a local privileged
+  peer can still deny service by flooding connections or events.
+
 ## Dependencies
 
 `requirements-lock.txt` is the canonical install set, with hashes:

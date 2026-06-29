@@ -1,7 +1,7 @@
 use familiar_core::capabilities::CapabilityId;
 use familiar_core::events::{Event, ProcessRef};
 use familiar_daemon::config::DaemonConfig;
-use familiar_daemon::control::apply_command;
+use familiar_daemon::control::{apply_command, apply_command_from};
 use familiar_daemon::persistence::GuardianState;
 use familiar_daemon::run::SensorHealth;
 use familiar_daemon::run::build_supervisor_with_sensors;
@@ -37,7 +37,8 @@ fn serve_control_round_trips_a_request() {
     }
     // Stub "tick loop": answer one command then stop.
     let loop_h = std::thread::spawn(move || {
-        if let Ok((req, reply)) = rx.recv() {
+        if let Ok((uid, req, reply)) = rx.recv() {
+            assert_eq!(uid, me);
             assert!(matches!(req, ControlRequest::ListCapabilities));
             let _ = reply.send(ControlResponse::Ok);
         }
@@ -255,6 +256,108 @@ fn set_capability_toggles_and_persists() {
     // Persisted to capabilities.json: a fresh load sees it on.
     let reloaded = familiar_daemon::persistence::load_capabilities(&cfg.state_dir);
     assert!(reloaded.is_enabled(CapabilityId::ActuatorFreezeProcess));
+}
+
+#[test]
+fn operator_cannot_reduce_protection_or_grant() {
+    if reexec_in_netns("operator_cannot_reduce_protection_or_grant") {
+        return;
+    }
+    let (mut cfg, mut sup) = armed_sup("operator-denied");
+    cfg.operator_uid = 1000;
+    let operator_uid = cfg.operator_uid;
+    let mut state = GuardianState { armed: true };
+
+    sup.drive_once(2000);
+    let status = apply_command(
+        &mut sup,
+        &cfg,
+        &mut state,
+        ControlRequest::GetStatus,
+        2000,
+        health(),
+    );
+    let id = match status {
+        ControlResponse::Status(s) => s.prompts[0].id,
+        o => panic!("{o:?}"),
+    };
+
+    let grant = apply_command_from(
+        &mut sup,
+        &cfg,
+        &mut state,
+        operator_uid,
+        ControlRequest::AnswerPrompt { id, granted: true },
+        2100,
+        health(),
+    );
+    assert!(matches!(grant, ControlResponse::Error(_)));
+    assert!(
+        !ruleset().contains("drop"),
+        "operator grant installs nothing"
+    );
+
+    let disable = apply_command_from(
+        &mut sup,
+        &cfg,
+        &mut state,
+        operator_uid,
+        ControlRequest::SetCapability {
+            id: CapabilityId::DetectorExfil,
+            enabled: false,
+        },
+        2200,
+        health(),
+    );
+    assert!(matches!(disable, ControlResponse::Error(_)));
+    assert!(
+        sup.engine
+            .registry()
+            .is_enabled(CapabilityId::DetectorExfil)
+    );
+
+    let disarm = apply_command_from(
+        &mut sup,
+        &cfg,
+        &mut state,
+        operator_uid,
+        ControlRequest::SetArmed { armed: false },
+        2300,
+        health(),
+    );
+    assert!(matches!(disarm, ControlResponse::Error(_)));
+    assert!(state.armed);
+
+    // Root may grant the prompt; the operator still cannot lift the resulting block.
+    assert_eq!(
+        apply_command(
+            &mut sup,
+            &cfg,
+            &mut state,
+            ControlRequest::AnswerPrompt { id, granted: true },
+            2400,
+            health(),
+        ),
+        ControlResponse::Ok
+    );
+    assert!(ruleset().contains("drop"));
+    let unblock = apply_command_from(
+        &mut sup,
+        &cfg,
+        &mut state,
+        operator_uid,
+        ControlRequest::Unblock {
+            dst_ip: "203.0.113.9".into(),
+            dst_port: 443,
+        },
+        2500,
+        health(),
+    );
+    assert!(matches!(unblock, ControlResponse::Error(_)));
+    assert!(
+        ruleset().contains("drop"),
+        "operator cannot lift containment"
+    );
 }
 
 #[test]

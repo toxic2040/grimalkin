@@ -3,11 +3,30 @@
 //! FileReadEvents onto a channel. In tests, a plain channel stands in for the
 //! socket so the network path is exercisable without the helper.
 use familiar_linux::wire::FileReadEvent;
-use std::io::{BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Read};
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::{self, JoinHandle};
+
+const MAX_FILE_READ_EVENT_BYTES: u64 = 64 * 1024;
+
+fn read_helper_line<R: BufRead>(reader: &mut R) -> io::Result<Option<String>> {
+    let mut line = String::new();
+    let n = reader
+        .take(MAX_FILE_READ_EVENT_BYTES + 1)
+        .read_line(&mut line)?;
+    if n == 0 {
+        return Ok(None);
+    }
+    if n as u64 > MAX_FILE_READ_EVENT_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "file-read event frame too large",
+        ));
+    }
+    Ok(Some(line))
+}
 
 /// Bind the helper socket, accept helper connections, and stream their
 /// newline-delimited FileReadEvent JSON onto a channel. The systemd units
@@ -52,8 +71,16 @@ pub fn spawn_socket_source_to(
                     continue;
                 }
             }
-            let reader = BufReader::new(stream);
-            for line in reader.lines().map_while(Result::ok) {
+            let mut reader = BufReader::new(stream);
+            loop {
+                let line = match read_helper_line(&mut reader) {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break,
+                    Err(e) => {
+                        eprintln!("[familiar] fileread: closing helper stream: {e}");
+                        break;
+                    }
+                };
                 if let Ok(ev) = serde_json::from_str::<FileReadEvent>(&line)
                     && tx.send(ev).is_err()
                 {
@@ -63,4 +90,17 @@ pub fn spawn_socket_source_to(
         }
     });
     Ok(handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn helper_line_cap_rejects_oversized_events() {
+        let mut cur = Cursor::new(vec![b'a'; (MAX_FILE_READ_EVENT_BYTES + 1) as usize]);
+        let err = read_helper_line(&mut cur).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
 }

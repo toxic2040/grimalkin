@@ -1,4 +1,4 @@
-//! Real netlink rule add/remove. Must run inside `unshare -Urn` (each test
+//! Real nftables rule add/remove. Must run inside `unshare -Urn` (each test
 //! re-execs itself into a private user+net namespace). Skips cleanly if
 //! unprivileged user namespaces are unavailable.
 use std::net::Ipv4Addr;

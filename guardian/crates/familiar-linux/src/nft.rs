@@ -11,7 +11,7 @@ pub const SENSE_CHAIN: &str = "egress-sense";
 
 #[derive(Debug, thiserror::Error)]
 pub enum NftError {
-    #[error("netlink send failed: {0}")]
+    #[error("nft command failed: {0}")]
     Send(String),
 }
 

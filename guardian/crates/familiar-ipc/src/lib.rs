@@ -12,7 +12,10 @@ use familiar_core::audit::AuditRecord;
 use familiar_core::capabilities::{CapabilityId, CapabilitySnapshot};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
+
+/// Maximum newline-delimited JSON frame size for the control socket.
+pub const MAX_FRAME_BYTES: u64 = 64 * 1024;
 
 /// Write one message as a single JSON line and flush.
 pub fn send<T: Serialize, W: Write>(w: &mut W, msg: &T) -> io::Result<()> {
@@ -25,9 +28,15 @@ pub fn send<T: Serialize, W: Write>(w: &mut W, msg: &T) -> io::Result<()> {
 /// Read exactly one JSON line and parse it. EOF before a line => `UnexpectedEof`.
 pub fn recv<T: DeserializeOwned, R: BufRead>(r: &mut R) -> io::Result<T> {
     let mut line = String::new();
-    let n = r.read_line(&mut line)?;
+    let n = r.take(MAX_FRAME_BYTES + 1).read_line(&mut line)?;
     if n == 0 {
         return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "peer closed"));
+    }
+    if n as u64 > MAX_FRAME_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "control frame too large",
+        ));
     }
     serde_json::from_str(line.trim_end()).map_err(io::Error::other)
 }
@@ -123,6 +132,15 @@ mod tests {
         assert_eq!(b, ControlRequest::GetStatus);
         // Third read hits EOF.
         assert!(recv::<ControlRequest, _>(&mut cur).is_err());
+    }
+
+    #[test]
+    fn oversized_frame_is_rejected() {
+        use std::io::Cursor;
+
+        let mut cur = Cursor::new(vec![b'a'; (MAX_FRAME_BYTES + 1) as usize]);
+        let err = recv::<ControlRequest, _>(&mut cur).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
