@@ -194,11 +194,13 @@ export GRIM_PIPER_MODEL=/path/to/piper-voice.onnx
 
 ```
 grimalkin/
-├── grimalkin.py              # Main application (~5200 LOC)
-├── grimalkin_core.py         # Engine — config, DB, bond, persona, search
-├── grimalkin_features.py     # Feature handlers — hunt, groom, pyre, mirror
-├── grimalkin_interfaces.py   # Gradio UI builder
+├── grimalkin.py              # Main application + Gradio UI (~5200 LOC)
+├── grimalkin_redact.py       # PII redaction engine (the privacy ward)
+├── grimalkin_loader.py       # Document loader + chunk redaction (parse-worker path)
+├── grimalkin_parse.py        # Sandboxed document parse worker
+├── grimalkin_interfaces.py   # Config + backend protocols
 ├── scripts/grim_voice.py     # Local STT/TTS command adapter
+├── eval/                     # Model eval harness (base-model swap decisions)
 ├── test_grimalkin.py         # Test suite
 ├── grimalkin.jpg             # Hero image
 ├── grimalkin_avatar.jpg      # Avatar / social icon

@@ -61,7 +61,7 @@ def main() -> int:
     # Heavy imports happen after the limits are in place, on purpose.
     from pathlib import Path
 
-    from grimalkin_core import load_and_chunk
+    from grimalkin_loader import load_and_chunk
     from grimalkin_interfaces import GrimalkinConfig
 
     config = GrimalkinConfig(

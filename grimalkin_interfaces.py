@@ -600,13 +600,10 @@ class AppContext:
     """
     Single object that carries all runtime state.
 
-    Replaces the (db, index, metadata) triple that threads through every v4.0
-    function call. In v5.0, callers receive ctx and access ctx.db, ctx.llm,
-    ctx.memory, ctx.feedback instead of positional index/metadata arguments.
-
-    Construct via make_context() in grimalkin_features.py:
-        ctx = make_context()                       # default: Ollama + FAISS
-        ctx = make_context(backend="rocm")         # future: ROCm backend
+    Carries db, llm, memory, and feedback as one object instead of threading a
+    (db, index, metadata) triple through every call. This is the dependency-
+    injection context for the backend protocols below; the running app
+    (grimalkin.py) is self-contained and does not construct one today.
     """
 
     db: Any  # sqlite3.Connection — shared across threads (WAL mode)

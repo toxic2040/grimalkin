@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import grimalkin
-import grimalkin_core
+import grimalkin_loader
 import numpy as np
 
 from grimalkin_redact import redact, reveal, RedactPolicy, redact_hybrid
@@ -339,12 +339,12 @@ def test_core_loom_html_fallback_escapes_entities():
         ('<svg onload="alert(1)">', "person<script>", 2, 0),
     )
     db.commit()
-    old_plotly = grimalkin_core.HAS_PLOTLY
+    old_plotly = grimalkin.HAS_PLOTLY
     try:
-        grimalkin_core.HAS_PLOTLY = False
-        html = grimalkin_core.build_loom_figure(db)
+        grimalkin.HAS_PLOTLY = False
+        html = grimalkin.build_loom_figure(db)
     finally:
-        grimalkin_core.HAS_PLOTLY = old_plotly
+        grimalkin.HAS_PLOTLY = old_plotly
     assert "<svg" not in html
     assert "person<script>" not in html
     assert "&lt;svg" in html
@@ -398,13 +398,15 @@ def test_parse_worker_returns_chunks_for_text():
 
 def test_parse_worker_fails_closed_under_low_memory_cap():
     """A memory cap too small to even import the parser must degrade to [],
-    never crash the caller — the containment guarantee."""
+    never crash the caller — the containment guarantee. The cap tracks the
+    worker's import floor (now leaner: grimalkin_loader, no numpy), so 24 MB is
+    below the floor on this stack while 48 MB would import fine."""
     old_cfg = grimalkin.CFG
     with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w") as f:
         f.write("prey")
         path = Path(f.name)
     try:
-        grimalkin.CFG = replace(old_cfg, parse_mem_mb=48)
+        grimalkin.CFG = replace(old_cfg, parse_mem_mb=24)
         assert grimalkin.load_and_chunk(path) == []
     finally:
         grimalkin.CFG = old_cfg
@@ -694,18 +696,18 @@ def test_hybrid_falls_back_without_model():
     print("hybrid fallback executed without leak")
 
 def test_redact_in_core_chunk_path():
-    # Drives SHIPPED grimalkin_core.load_and_chunk on .txt file (exercises redaction seam).
+    # Drives SHIPPED grimalkin_loader.load_and_chunk on .txt file (the parse-worker entry).
     # In envs without langchain_text_splitters it hits the documented txt fallback path
     # (still full redaction + metadata). Real splitter branch taken when the optional
     # dep is present; same entry point is exercised either way.
     import tempfile
     from pathlib import Path
-    cfg = grimalkin_core.GrimalkinConfig(pii_redaction="deterministic")
+    cfg = grimalkin_loader.GrimalkinConfig(pii_redaction="deterministic")
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "pii.txt"
         orig = "Owner: Alice Example, SSN: 111-22-3333 card 5555555555554444"
         p.write_text(orig)
-        chunks = grimalkin_core.load_and_chunk(p, cfg)
+        chunks = grimalkin_loader.load_and_chunk(p, cfg)
         assert len(chunks) > 0
         redacted_executed = False
         for c in chunks:
@@ -715,45 +717,6 @@ def test_redact_in_core_chunk_path():
             assert "card" in c.page_content.lower() or "[CREDIT" in c.page_content
         assert redacted_executed, "redaction must have executed on chunk content"
         print("chunk path redaction executed with fidelity")
-
-def test_redact_before_respond_path():
-    # Actually invoke grimalkin_respond via features with a minimal mock ctx to show redaction before LLM
-    from grimalkin_features import grimalkin_respond
-    from grimalkin_interfaces import GrimalkinConfig, AppContext, LLMBackend
-    from unittest.mock import MagicMock
-
-    class MockLLM(LLMBackend):
-        def __init__(self, cfg):
-            self.config = cfg
-        def infer(self, prompt, system="", model=""):
-            return "LLM saw: " + prompt  # echo the (redacted) prompt
-        def embed_texts(self, texts):
-            return [[0.0]*768 for _ in texts]
-        def embed_query(self, text):
-            return [0.0]*768
-
-    cfg = GrimalkinConfig(pii_redaction="deterministic")
-    mock_llm = MockLLM(cfg)
-    ctx = MagicMock(spec=AppContext)
-    ctx.config = cfg
-    ctx.llm = mock_llm
-    ctx.memory = MagicMock()
-    ctx.db = MagicMock()
-    ctx.feedback = MagicMock()
-
-    prompt = "Hi, my name is Test User and SSN is 222-33-4444"
-    received_by_llm = []
-    def recording_respond(p, context="", persona=""):
-        received_by_llm.append(p)
-        return "LLM-RECEIVED: " + p   # simulate what the backend would return (redacted input echoed)
-    ctx.llm.respond = recording_respond
-    resp = grimalkin_respond(prompt, context="", ctx=ctx, task_type="general")
-    # The LLM input is redacted, and default output is not rehydrated.
-    assert len(received_by_llm) == 1
-    assert "222-33-4444" not in received_by_llm[0], "raw PII leaked to LLM"
-    assert "[P_SSN_1]" in received_by_llm[0] or "[P_GIVEN_NAME" in received_by_llm[0], "no scoped placeholder sent to LLM"
-    assert "222-33-4444" not in resp, "default response rehydrated PII"
-    print("grimalkin_respond exercised with PII; redaction ran before LLM (LLM saw placeholder)")
 
 
 def test_monolith_ollama_chat_redacts_prompt_history_and_system():
