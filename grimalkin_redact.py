@@ -82,8 +82,8 @@ def ssn_struct_valid(ssn: str) -> bool:
 STRUCTURED_PATTERNS: List[Tuple[str, re.Pattern, callable]] = [
     ("SSN", re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), ssn_struct_valid),
     ("CREDIT_CARD", re.compile(r"\b(?:\d[ -]*?){13,16}\b"), luhn_valid),
-    ("EMAIL", re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b"), lambda x: True),
-    ("PHONE", re.compile(r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b"), lambda x: True),
+    ("EMAIL", re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"), lambda x: True),
+    ("PHONE", re.compile(r"(?:\+?1[-.\s]?)?\(?\b\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b"), lambda x: True),
     ("ROUTING_NUMBER", re.compile(r"\b\d{9}\b"), lambda x: True),  # loose; refine in practice
     ("IP_ADDRESS", re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), lambda x: True),
     ("URL", re.compile(r"https?://[^\s<>\"]+|www\.[^\s<>\"]+"), lambda x: True),
@@ -119,10 +119,6 @@ def _collect_deterministic_spans(text: str, policy: RedactPolicy) -> list[tuple[
     Shared by redact() and redact_hybrid().
     """
     spans = []
-    counters = {}  # per label for placeholder numbering, but numbering done later in rebuild? No, for val uniqueness we track here.
-
-    # Track seen values to reuse placeholders
-    value_to_ph = {}
 
     def should_add(label: str, val: str) -> bool:
         if not policy.should_redact(label):
@@ -138,10 +134,6 @@ def _collect_deterministic_spans(text: str, policy: RedactPolicy) -> list[tuple[
             if validator and not validator(val):
                 continue
             if should_add(label, val):
-                if val not in value_to_ph:
-                    counters[label] = counters.get(label, 0) + 1
-                    ph = _stable_placeholder(label, counters[label], policy.placeholder_prefix)
-                    value_to_ph[val] = ph
                 spans.append((m.start(), m.end(), label, val))
 
     # Names (GIVEN requires prefix group)
@@ -158,10 +150,6 @@ def _collect_deterministic_spans(text: str, policy: RedactPolicy) -> list[tuple[
                     val = m.group(1).strip() if m.lastindex else m.group(0).strip()
                     start, end = m.start(), m.end()
                 if should_add(label, val):
-                    if val not in value_to_ph:
-                        counters[label] = counters.get(label, 0) + 1
-                        ph = _stable_placeholder(label, counters[label], policy.placeholder_prefix)
-                        value_to_ph[val] = ph
                     spans.append((start, end, label, val))
 
     # Addresses
@@ -169,10 +157,6 @@ def _collect_deterministic_spans(text: str, policy: RedactPolicy) -> list[tuple[
         for m in pattern.finditer(text):
             val = m.group(0)
             if should_add(label, val):
-                if val not in value_to_ph:
-                    counters[label] = counters.get(label, 0) + 1
-                    ph = _stable_placeholder(label, counters[label], policy.placeholder_prefix)
-                    value_to_ph[val] = ph
                 spans.append((m.start(), m.end(), label, val))
 
     return spans

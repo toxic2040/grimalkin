@@ -128,10 +128,12 @@ def main():
             tok.pad_token = tok.eos_token
         model = AutoModelForCausalLM.from_pretrained(base, trust_remote_code=args.trust_remote_code)
         # LoRA if peft
+        lora_enabled = False
         try:
             from peft import LoraConfig, get_peft_model
             lora = LoraConfig(r=8, lora_alpha=16, target_modules=["q_proj","v_proj"], lora_dropout=0.05, bias="none")
             model = get_peft_model(model, lora)
+            lora_enabled = True
             print("[REAL] LoRA (peft) enabled")
         except Exception:
             print("[REAL] peft not available, full fine-tune (or as loaded)")
@@ -160,7 +162,7 @@ def main():
                 "task": task,
                 "base": base,
                 "real": True,
-                "lora": "peft" if 'peft' in dir() else False,
+                "lora": "peft" if lora_enabled else False,
                 "grimalkin_use": "personality_or_redact",
             }, f)
         gguf = out_dir / "gemma_redact_demo.gguf"

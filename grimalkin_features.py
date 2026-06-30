@@ -322,15 +322,16 @@ def grimalkin_respond(
         p = Path(gpm)
         meta = _load_gemma_metadata(p) if p.exists() else {}
         if meta:
-            # select and invoke the trained model instead of ollama backend
-            try:
-                if meta.get("task") == "persona":
-                    local = f"[Gemma-personality@{p.name}] Understood the query about the vault. " + red_prompt[:100]
-                else:
-                    local = "[Gemma-redact-model@" + p.name + "] " + red_prompt
-                return maybe_reveal_llm_output(local, full_map, cfg)
-            except Exception:
-                pass  # fall through to ollama
+            # A custom Gemma checkpoint is configured, but there is no real Gemma
+            # loader/generator wired yet. Do NOT fabricate model output here —
+            # generation falls through to the live backend below, and
+            # build_enhanced_persona annotates the persona so the configuration is
+            # visible. Wire the real weight-loading + generate() path here once a
+            # trained checkpoint exists.
+            log.info(
+                "gemma_personality_model configured (%s); live generation still uses the base backend",
+                p.name,
+            )
 
     if ctx is not None:
         persona = build_enhanced_persona(ctx, task_type)
