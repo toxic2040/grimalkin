@@ -11,10 +11,13 @@ import tempfile
 import wave
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 import grimalkin
 import grimalkin_core
 import numpy as np
+
+from grimalkin_redact import redact, reveal, RedactPolicy, redact_hybrid
 
 from grimalkin import (
     _check_auth,
@@ -657,6 +660,194 @@ def test_session_isolation():
     assert history_a[0]["content"] == "hello from A"
     assert history_b[0]["content"] == "hello from B"
 
+
+# ─── PII Redaction tests (options 1+2) ────────────────────────────────────────
+
+def test_deterministic_redact_basic():
+    policy = RedactPolicy()
+    text = "SSN 123-45-6789, card 4111111111111111, email test@example.com, phone 555-123-4567, name John Smith"
+    red, mapping = redact(text, policy)
+    assert "123-45-6789" not in red
+    assert "4111111111111111" not in red
+    assert "test@example.com" not in red
+    # non-PII context words preserved (fidelity)
+    assert "SSN" in red
+    assert "card" in red
+    assert "email" in red
+    assert "[SSN_1]" in red or "[CREDIT_CARD_1]" in red or "[EMAIL_1]" in red
+    restored = reveal(red, mapping)
+    assert "123-45-6789" in restored or "4111" in restored  # at least one restored
+    print("deterministic basic ok")
+
+def test_reveal_idempotent_and_no_leak():
+    text = "My SSN is 078-05-1120"
+    red, mp = redact(text)
+    assert "078-05-1120" not in red
+    restored = reveal(red, mp)
+    assert "078-05-1120" in restored
+
+def test_hybrid_falls_back_without_model():
+    # Even without GLiNER, hybrid should not leak (deterministic layer protects)
+    text = "John's SSN 123-45-6789"
+    red, mp = redact_hybrid(text)
+    assert "123-45-6789" not in red
+    print("hybrid fallback executed without leak")
+
+def test_redact_in_core_chunk_path():
+    # Drives SHIPPED grimalkin_core.load_and_chunk on .txt file (exercises redaction seam).
+    # In envs without langchain_text_splitters it hits the documented txt fallback path
+    # (still full redaction + metadata). Real splitter branch taken when the optional
+    # dep is present; same entry point is exercised either way.
+    import tempfile
+    from pathlib import Path
+    cfg = grimalkin_core.GrimalkinConfig(pii_redaction="deterministic")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "pii.txt"
+        orig = "Owner: Alice Example, SSN: 111-22-3333 card 5555555555554444"
+        p.write_text(orig)
+        chunks = grimalkin_core.load_and_chunk(p, cfg)
+        assert len(chunks) > 0
+        redacted_executed = False
+        for c in chunks:
+            if "111-22-3333" not in c.page_content and "5555555555554444" not in c.page_content:
+                redacted_executed = True
+            assert "SSN" in c.page_content or "[SSN" in c.page_content, "fidelity: SSN label must survive in redacted chunk"
+            assert "card" in c.page_content.lower() or "[CREDIT" in c.page_content
+        assert redacted_executed, "redaction must have executed on chunk content"
+        print("chunk path redaction executed with fidelity")
+
+def test_redact_before_respond_path():
+    # Actually invoke grimalkin_respond via features with a minimal mock ctx to show redaction before LLM
+    from grimalkin_features import grimalkin_respond
+    from grimalkin_interfaces import GrimalkinConfig, AppContext, LLMBackend
+    from unittest.mock import MagicMock
+
+    class MockLLM(LLMBackend):
+        def __init__(self, cfg):
+            self.config = cfg
+        def infer(self, prompt, system="", model=""):
+            return "LLM saw: " + prompt  # echo the (redacted) prompt
+        def embed_texts(self, texts):
+            return [[0.0]*768 for _ in texts]
+        def embed_query(self, text):
+            return [0.0]*768
+
+    cfg = GrimalkinConfig(pii_redaction="deterministic")
+    mock_llm = MockLLM(cfg)
+    ctx = MagicMock(spec=AppContext)
+    ctx.config = cfg
+    ctx.llm = mock_llm
+    ctx.memory = MagicMock()
+    ctx.db = MagicMock()
+    ctx.feedback = MagicMock()
+
+    prompt = "Hi, my name is Test User and SSN is 222-33-4444"
+    received_by_llm = []
+    def recording_respond(p, context="", persona=""):
+        received_by_llm.append(p)
+        return "LLM-RECEIVED: " + p   # simulate what the backend would return (redacted input echoed)
+    ctx.llm.respond = recording_respond
+    resp = grimalkin_respond(prompt, context="", ctx=ctx, task_type="general")
+    # The LLM input is redacted, and default output is not rehydrated.
+    assert len(received_by_llm) == 1
+    assert "222-33-4444" not in received_by_llm[0], "raw PII leaked to LLM"
+    assert "[P_SSN_1]" in received_by_llm[0] or "[P_GIVEN_NAME" in received_by_llm[0], "no scoped placeholder sent to LLM"
+    assert "222-33-4444" not in resp, "default response rehydrated PII"
+    print("grimalkin_respond exercised with PII; redaction ran before LLM (LLM saw placeholder)")
+
+
+def test_monolith_ollama_chat_redacts_prompt_history_and_system():
+    if not grimalkin.HAS_REQUESTS:
+        print("requests absent; skipping ollama redaction boundary test")
+        return
+
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {"content": "model saw [P_SSN_1]"},
+                        "logprobs": {"content": []},
+                    }
+                ]
+            }
+
+    def fake_post(url, json=None, timeout=120):
+        captured["json"] = json
+        return FakeResponse()
+
+    with patch.object(grimalkin.requests, "post", fake_post):
+        result = grimalkin.ollama_chat(
+            "my SSN is 111-22-3333",
+            system="operator email root@example.com",
+            history=[{"role": "user", "content": "old card 4111111111111111"}],
+        )
+
+    sent = json.dumps(captured["json"]["messages"])
+    assert "111-22-3333" not in sent
+    assert "root@example.com" not in sent
+    assert "4111111111111111" not in sent
+    assert "[P_SSN_1]" in sent
+    assert "111-22-3333" not in result.text
+
+
+def test_monolith_hybrid_vault_rag_redacts_query_before_retrieval():
+    calls = {}
+
+    class FakeDb:
+        def cursor(self):
+            return self
+
+    def fake_faiss_search(index, metadata, query, k=15):
+        calls["faiss"] = query
+        return []
+
+    def fake_keyword_search(db, query, limit=10):
+        calls["keyword"] = query
+        return set()
+
+    def fake_graph_query(db, query):
+        calls["graph"] = query
+        return ""
+
+    def fake_respond(prompt, context="", db=None, faiss_dists=None):
+        calls["respond"] = prompt
+        return "answer " + prompt
+
+    with patch.object(grimalkin, "faiss_search", fake_faiss_search), \
+        patch.object(grimalkin, "keyword_search", fake_keyword_search), \
+        patch.object(grimalkin, "graph_query", fake_graph_query), \
+        patch.object(grimalkin, "grimalkin_respond", fake_respond):
+        result = grimalkin.hybrid_vault_rag(FakeDb(), object(), [], "find SSN 111-22-3333")
+
+    assert "111-22-3333" not in calls["faiss"]
+    assert "111-22-3333" not in calls["keyword"]
+    assert "111-22-3333" not in calls["respond"]
+    assert "111-22-3333" not in result
+
+def test_redact_preserves_non_pii_context():
+    """Fidelity fixture per strategy: non-PII labels/context words must stay literal in REDACTED text.
+    Uses exact strings from demo and log. Asserts reveal roundtrips exactly.
+    """
+    from grimalkin_redact import redact, reveal
+    cases = [
+        "SSN 123-45-6789 card 4111111111111111 email a@b.com",
+        "User with SSN 123-45-6789"
+    ]
+    non_pii_words = ["SSN", "card", "email", "User", "with"]
+    for orig in cases:
+        red, mp = redact(orig)
+        for word in non_pii_words:
+            if word in orig:
+                assert word in red, f"non-PII context word '{word}' was mangled/removed in redacted for input: {orig!r} -> {red!r}"
+        restored = reveal(red, mp)
+        assert restored == orig, f"roundtrip failed: orig={orig!r} restored={restored!r}"
+    print("test_redact_preserves_non_pii_context PASS (but expected to FAIL initially)")
 
 # ─── Runner ───────────────────────────────────────────────────────────────────
 

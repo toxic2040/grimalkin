@@ -29,6 +29,10 @@ dependency lock above the current security floors.
 
 **Qwen3 local path** adds `/no_think` handling and visible think-artifact cleanup for Qwen3-family Ollama models.
 
+**PII redaction (options 1+2)**: deterministic regex+validators + optional hybrid with an explicitly configured local GLiNER-style model, applied to user prompts and document chunks before they reach the LLM or FAISS. Stable scoped placeholders stay redacted by default; local rehydration is opt-in with `GRIM_PII_REVEAL=true`. Config via `GRIM_PII_REDACTION=deterministic|hybrid|off`.
+
+Prototype training script (`scripts/train_gemma_pii.py`) for small local Gemma-class models on synthetic PII redaction or persona data. Remote model downloads require `--allow-downloads`, and remote code loading requires `--trust-remote-code`.
+
 ## What It Does
 
 **🐾 Scratch Post** — Chat with Grimalkin. Ask questions, run commands, use optional local push-to-talk, or just talk. It remembers.

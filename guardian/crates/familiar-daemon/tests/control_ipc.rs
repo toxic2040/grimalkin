@@ -259,8 +259,8 @@ fn set_capability_toggles_and_persists() {
 }
 
 #[test]
-fn operator_cannot_reduce_protection_or_grant() {
-    if reexec_in_netns("operator_cannot_reduce_protection_or_grant") {
+fn operator_cannot_change_privileged_posture_or_grant() {
+    if reexec_in_netns("operator_cannot_change_privileged_posture_or_grant") {
         return;
     }
     let (mut cfg, mut sup) = armed_sup("operator-denied");
@@ -296,6 +296,36 @@ fn operator_cannot_reduce_protection_or_grant() {
         !ruleset().contains("drop"),
         "operator grant installs nothing"
     );
+
+    let enable_actuator = apply_command_from(
+        &mut sup,
+        &cfg,
+        &mut state,
+        operator_uid,
+        ControlRequest::SetCapability {
+            id: CapabilityId::ActuatorFreezeProcess,
+            enabled: true,
+        },
+        2150,
+        health(),
+    );
+    assert!(matches!(enable_actuator, ControlResponse::Error(_)));
+    assert!(
+        !sup.engine
+            .registry()
+            .is_enabled(CapabilityId::ActuatorFreezeProcess)
+    );
+
+    let arm = apply_command_from(
+        &mut sup,
+        &cfg,
+        &mut state,
+        operator_uid,
+        ControlRequest::SetArmed { armed: true },
+        2160,
+        health(),
+    );
+    assert!(matches!(arm, ControlResponse::Error(_)));
 
     let disable = apply_command_from(
         &mut sup,

@@ -62,6 +62,12 @@ class GrimalkinConfig:
     max_vectors: int = 120_000  # prune threshold (future)
     max_persona_tokens: int = 512  # cap on persona system prompt
 
+    # PII redaction (options 1+2 + Gemma personality path)
+    pii_redaction: str = "deterministic"  # off | deterministic | hybrid
+    pii_keep: tuple = ("CITY", "STATE", "ZIP_CODE")
+    pii_reveal: bool = False  # opt-in only; default keeps model output redacted
+    gemma_personality_model: str = ""  # path or HF id for custom trained Gemma (future Grimmy)
+
     # Paths
     app_dir: Path = field(default_factory=lambda: Path(__file__).parent)
 

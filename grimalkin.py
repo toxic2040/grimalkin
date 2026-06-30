@@ -47,6 +47,13 @@ from threading import Thread
 from ipaddress import ip_address
 from urllib.parse import urlparse
 
+from grimalkin_redact import (
+    make_policy_from_config,
+    redact,
+    redact_hybrid,
+    reveal,
+)
+
 # ─── Dependency Pre-flight ─────────────────────────────────────────────────────
 
 _REQUIRED = [
@@ -151,6 +158,9 @@ class GrimConfig:
     max_ingest_mb: int = 25  # reject larger files before parsing
     parse_timeout: int = 60  # wall-clock seconds per file in the parse worker
     parse_mem_mb: int = 1024  # address-space cap for the parse worker
+    pii_redaction: str = "deterministic"  # off | deterministic | hybrid
+    pii_keep: str = "CITY,STATE,ZIP_CODE"
+    pii_reveal: bool = False  # opt-in only; default keeps model output redacted
     # Bond gates
     pyre_bond_gate: int = 30
     graph_whisper_gate: int = 40
@@ -169,6 +179,38 @@ class GrimConfig:
 
 _load_env_file(APP_DIR / ".env")
 CFG = GrimConfig.from_env()
+
+
+def _redaction_policy(scope: str = ""):
+    policy = make_policy_from_config(CFG)
+    policy.placeholder_prefix = scope
+    return policy
+
+
+def _redact_runtime_text(text: str, scope: str = "") -> tuple[str, dict[str, str]]:
+    if not text or CFG.pii_redaction == "off":
+        return text, {}
+    policy = _redaction_policy(scope)
+    if CFG.pii_redaction == "hybrid":
+        return redact_hybrid(text, policy)
+    return redact(text, policy)
+
+
+def _merge_redaction_maps(*maps: dict[str, str]) -> dict[str, str]:
+    merged: dict[str, str] = {}
+    for mp in maps:
+        for placeholder, original in (mp or {}).items():
+            existing = merged.get(placeholder)
+            if existing is not None and existing != original:
+                raise ValueError(f"redaction placeholder collision: {placeholder}")
+            merged[placeholder] = original
+    return merged
+
+
+def _maybe_reveal_runtime_text(text: str, mapping: dict[str, str]) -> str:
+    if CFG.pii_reveal:
+        return reveal(text, mapping)
+    return text
 
 # ─── File Categories ───────────────────────────────────────────────────────────
 
@@ -962,13 +1004,25 @@ def ollama_chat(
     if not HAS_REQUESTS:
         return OllamaResult("Hrk. Hairball. The requests library is missing.", [])
     model = model or CFG.ollama_model
-    prompt = _with_no_think(prompt, model)
+    red_system, smap = _redact_runtime_text(system, "SYS")
+    red_prompt, pmap = _redact_runtime_text(prompt, "P")
+    red_history = []
+    history_maps = []
+    for i, msg in enumerate(history or []):
+        red_content, hmap = _redact_runtime_text(str(msg.get("content", "")), f"H{i}")
+        red_msg = dict(msg)
+        red_msg["content"] = red_content
+        red_history.append(red_msg)
+        history_maps.append(hmap)
+    output_map = _merge_redaction_maps(smap, pmap, *history_maps)
+
+    red_prompt = _with_no_think(red_prompt, model)
     messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    if history:
-        messages.extend(history)
-    messages.append({"role": "user", "content": prompt})
+    if red_system:
+        messages.append({"role": "system", "content": red_system})
+    if red_history:
+        messages.extend(red_history)
+    messages.append({"role": "user", "content": red_prompt})
     last_err = None
     for attempt in range(3):
         try:
@@ -988,6 +1042,7 @@ def ollama_chat(
             choice = data.get("choices", [{}])[0]
             text = choice.get("message", {}).get("content", "").strip()
             text = _strip_think_artifacts(text, model)
+            text = _maybe_reveal_runtime_text(text, output_map)
             lp_data = choice.get("logprobs", {})
             logprobs = lp_data.get("content", []) if lp_data else []
             return OllamaResult(text, logprobs)
@@ -1226,14 +1281,16 @@ def grimalkin_respond(
     # Build the current user message: doc/graph context + actual question
     user_parts = []
     if context:
-        user_parts.append(context[: CFG.context_budget])
-    user_parts.append(prompt)
+        red_context, _ = _redact_runtime_text(context[: CFG.context_budget], "C")
+        user_parts.append(red_context)
+    red_prompt, _ = _redact_runtime_text(prompt, "Q")
+    user_parts.append(red_prompt)
     user_prompt = "\n\n".join(user_parts)
 
     result = ollama_chat(user_prompt, system=persona, history=chat_history)
     metrics = compute_generation_metrics(result.logprobs)
     clean = scrub_corporate(result.text)
-    _log_generation(db, prompt, metrics, len(clean), faiss_dists)
+    _log_generation(db, red_prompt, metrics, len(clean), faiss_dists)
     return clean
 
 
@@ -1504,7 +1561,8 @@ def keyword_search(db, query: str, limit: int = 10) -> set[str]:
 
 def hybrid_vault_rag(db, index, metadata, query: str) -> str:
     """Hybrid keyword + semantic RAG."""
-    results = faiss_search(index, metadata, query, k=15)
+    redacted_query, _ = _redact_runtime_text(query, "Q")
+    results = faiss_search(index, metadata, redacted_query, k=15)
     faiss_dists = [r.get("score", 0.0) for r in results]
     cur = db.cursor()
     valid = []
@@ -1519,7 +1577,7 @@ def hybrid_vault_rag(db, index, metadata, query: str) -> str:
             continue  # burned but not yet cremated, skip
         valid.append(r)
 
-    kw_fns = keyword_search(db, query)
+    kw_fns = keyword_search(db, redacted_query)
     boosted = []
     seen = set()
     for r in valid:
@@ -1545,7 +1603,7 @@ def hybrid_vault_rag(db, index, metadata, query: str) -> str:
 
     if not boosted:
         return grimalkin_respond(
-            query, context="The vault is empty.", db=db, faiss_dists=faiss_dists
+            redacted_query, context="The vault is empty.", db=db, faiss_dists=faiss_dists
         )
 
     boosted.sort(key=lambda x: x.get("score", 1.0))
@@ -1558,7 +1616,7 @@ def hybrid_vault_rag(db, index, metadata, query: str) -> str:
     graph_context = ""
     _gi = get_graph_injection(db)
     if _gi != "never":
-        g = graph_query(db, query)
+        g = graph_query(db, redacted_query)
         if g and (_gi == "always" or g.count("\n") >= 1):
             graph_context = f"My web shows these connections:\n{g}"
 
@@ -1573,7 +1631,9 @@ def hybrid_vault_rag(db, index, metadata, query: str) -> str:
         context_parts.append(graph_context[:remaining])
 
     context = "\n\n".join(context_parts)
-    return grimalkin_respond(query, context=context, db=db, faiss_dists=faiss_dists)
+    return grimalkin_respond(
+        redacted_query, context=context, db=db, faiss_dists=faiss_dists
+    )
 
 
 # ─── The Hunt (File Sorting) ──────────────────────────────────────────────────
@@ -2658,18 +2718,19 @@ def proactive_whispers(db, bond_level: int) -> list[str]:
 
 
 def recall(db, index, metadata, term: str) -> str:
-    g = graph_query(db, term)
-    kw = keyword_search(db, term)
+    red_term, _ = _redact_runtime_text(term, "Q")
+    g = graph_query(db, red_term)
+    kw = keyword_search(db, red_term)
     cur = db.cursor()
     cur.execute(
         "SELECT summary FROM reflections WHERE key_entities LIKE ? ORDER BY reflection_date DESC LIMIT 3",
-        (f"%{term}%",),
+        (f"%{red_term}%",),
     )
     refs = [row[0] for row in cur.fetchall()]
     # Pull relevant chat history
     cur.execute(
         "SELECT role, content FROM chat_history WHERE content LIKE ? ORDER BY created_at DESC LIMIT 6",
-        (f"%{term}%",),
+        (f"%{red_term}%",),
     )
     chat_refs = [f"{r[0]}: {r[1][:100]}" for r in cur.fetchall()]
     context = (
@@ -2679,7 +2740,7 @@ def recall(db, index, metadata, term: str) -> str:
     if chat_refs:
         context += "\n\nPast conversations mentioning it:\n" + "\n".join(chat_refs)
     return grimalkin_respond(
-        f"Tell me everything about {term}.", context=context, db=db
+        f"Tell me everything about {red_term}.", context=context, db=db
     )
 
 

@@ -6,6 +6,7 @@
 use crate::config::DaemonConfig;
 use crate::persistence::{self, GuardianState};
 use familiar_advisor::NullAdvisor;
+use familiar_core::capabilities::CapabilityId;
 use familiar_core::permission::PermissionRequest;
 use familiar_core::policy::ProposedAction;
 use familiar_ipc::{BlockDto, ControlRequest, ControlResponse, PromptDto, StatusSnapshot};
@@ -14,6 +15,13 @@ use familiar_platform::Sensors;
 use familiar_runtime::Supervisor;
 
 type Sup<S> = Supervisor<S, LinuxActuators, LinuxNotifier, NullAdvisor>;
+
+fn privileged_capability(id: &CapabilityId) -> bool {
+    matches!(
+        id,
+        CapabilityId::ActuatorBlockConn | CapabilityId::ActuatorFreezeProcess
+    )
+}
 
 fn prompt_dto(r: &PermissionRequest) -> PromptDto {
     PromptDto {
@@ -55,8 +63,8 @@ fn status<S: Sensors>(
 
 fn root_required(req: &ControlRequest) -> bool {
     match req {
-        ControlRequest::SetArmed { armed } => !*armed,
-        ControlRequest::SetCapability { enabled, .. } => !*enabled,
+        ControlRequest::SetArmed { .. } => true,
+        ControlRequest::SetCapability { id, enabled } => !*enabled || privileged_capability(id),
         ControlRequest::AnswerPrompt { granted, .. } => *granted,
         ControlRequest::Unblock { .. } => true,
         ControlRequest::ListCapabilities

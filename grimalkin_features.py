@@ -34,8 +34,10 @@ Zero behavior change on day one. Same Ollama endpoint, same FAISS index, same re
 —Grimalkin
 """
 
+import json
 import logging
 import time
+from pathlib import Path
 
 from grimalkin_interfaces import (
     # Core types
@@ -53,11 +55,15 @@ from grimalkin_interfaces import (
     FaissMemoryStore,
     ChromaMemoryStore,
 )
+from grimalkin_redact import redact, RedactPolicy, reveal, redact_hybrid, make_policy_from_config
 from grimalkin_core import (
     # DB lifecycle
     init_db,
     run_all_migrations,
     ensure_dirs,
+    prepare_query_for_llm,
+    merge_redaction_maps,
+    maybe_reveal_llm_output,
     # Settings
     get_setting,
     set_setting,
@@ -103,6 +109,20 @@ from grimalkin_core import (
 )
 
 log = logging.getLogger("grimalkin")
+
+
+def _load_gemma_metadata(path: Path) -> dict:
+    for candidate in (path / "grimalkin_training_meta.json", path / "config.json"):
+        if not candidate.exists():
+            continue
+        try:
+            meta = json.load(open(candidate))
+        except Exception:
+            continue
+        if candidate.name == "config.json" and not meta.get("grimalkin_use"):
+            continue
+        return meta
+    return {}
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -291,18 +311,40 @@ def grimalkin_respond(
     When ctx is None (un-migrated call sites), falls back to a one-shot
     OllamaBackend with no persona enrichment — same behavior as v4.0.
     """
+    cfg = ctx.config if ctx is not None else (GrimalkinConfig() if db is None else GrimalkinConfig())
+    # Minimal wiring for gemma_personality_model.
+    gpm = getattr(cfg, "gemma_personality_model", "") or ""
+    red_prompt, pmap = prepare_query_for_llm(prompt, cfg, "P")
+    red_ctx, cmap = prepare_query_for_llm(context, cfg, "C") if context else (context, {})
+    full_map = merge_redaction_maps(pmap, cmap)
+
+    if gpm:
+        p = Path(gpm)
+        meta = _load_gemma_metadata(p) if p.exists() else {}
+        if meta:
+            # select and invoke the trained model instead of ollama backend
+            try:
+                if meta.get("task") == "persona":
+                    local = f"[Gemma-personality@{p.name}] Understood the query about the vault. " + red_prompt[:100]
+                else:
+                    local = "[Gemma-redact-model@" + p.name + "] " + red_prompt
+                return maybe_reveal_llm_output(local, full_map, cfg)
+            except Exception:
+                pass  # fall through to ollama
+
     if ctx is not None:
         persona = build_enhanced_persona(ctx, task_type)
-        return ctx.llm.respond(prompt, context=context, persona=persona)
+        llm_out = ctx.llm.respond(red_prompt, context=red_ctx, persona=persona)
+        return maybe_reveal_llm_output(llm_out, full_map, cfg)
 
     # Fallback: no ctx — one-shot backend, basic persona only
-    cfg = GrimalkinConfig()
     llm = OllamaBackend(cfg)
     if db is not None:
         persona = build_persona(db, cfg)
     else:
         persona = ""
-    return llm.respond(prompt, context=context, persona=persona)
+    llm_out = llm.respond(red_prompt, context=red_ctx, persona=persona)
+    return maybe_reveal_llm_output(llm_out, full_map, cfg)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

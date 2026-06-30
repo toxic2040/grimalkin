@@ -21,16 +21,33 @@ import shutil
 import sqlite3
 from datetime import date
 from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from numpy.linalg import norm
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import (
-    PyPDFLoader,
-    TextLoader,
-    UnstructuredWordDocumentLoader,
-    CSVLoader,
-)
+
+# Lazy imports for loaders (avoid pulling langchain unless chunking files)
+def _get_text_splitter():
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    return RecursiveCharacterTextSplitter
+
+def _get_loader_map():
+    from langchain_community.document_loaders import (
+        PyPDFLoader,
+        TextLoader,
+        UnstructuredWordDocumentLoader,
+        CSVLoader,
+    )
+    return {
+        ".pdf": PyPDFLoader,
+        ".txt": TextLoader,
+        ".md": TextLoader,
+        ".html": TextLoader,
+        ".htm": TextLoader,
+        ".docx": UnstructuredWordDocumentLoader,
+        ".doc": UnstructuredWordDocumentLoader,
+        ".csv": CSVLoader,
+    }
 
 from grimalkin_interfaces import (
     GrimalkinConfig,
@@ -38,8 +55,86 @@ from grimalkin_interfaces import (
     LLMBackend,
     ChunkRecord,
 )
+from grimalkin_redact import redact, redact_hybrid, RedactPolicy, reveal, make_policy_from_config, DEFAULT_KEEP
 
 log = logging.getLogger("grimalkin")
+
+# ─── Pure redaction seams (for testability + empty-vault/respond/chunk paths) ─
+
+def _scoped_policy(cfg: Optional[GrimalkinConfig], scope: str = "") -> RedactPolicy:
+    policy = make_policy_from_config(cfg)
+    policy.placeholder_prefix = scope
+    return policy
+
+
+def prepare_query_for_llm(
+    query: str,
+    cfg: Optional[GrimalkinConfig] = None,
+    scope: str = "",
+) -> Tuple[str, Dict[str, str]]:
+    """Seam: redact a user query/prompt before sending to LLM or using in RAG. Returns (redacted, qmap)."""
+    cfg = cfg or GrimalkinConfig()
+    mode = getattr(cfg, 'pii_redaction', 'deterministic')
+    if mode == 'off':
+        return query, {}
+    policy = _scoped_policy(cfg, scope)
+    if mode == 'hybrid':
+        return redact_hybrid(query, policy)
+    return redact(query, policy)
+
+
+def merge_redaction_maps(*maps: Dict[str, str]) -> Dict[str, str]:
+    merged: Dict[str, str] = {}
+    for mp in maps:
+        for placeholder, original in (mp or {}).items():
+            existing = merged.get(placeholder)
+            if existing is not None and existing != original:
+                raise ValueError(f"redaction placeholder collision: {placeholder}")
+            merged[placeholder] = original
+    return merged
+
+
+def maybe_reveal_llm_output(
+    text: str,
+    mapping: Dict[str, str],
+    cfg: Optional[GrimalkinConfig] = None,
+) -> str:
+    cfg = cfg or GrimalkinConfig()
+    if getattr(cfg, "pii_reveal", False):
+        return reveal(text, mapping)
+    return text
+
+
+def redact_chunk_pages(chunks: List, cfg: Optional[GrimalkinConfig] = None) -> List:
+    """Seam: apply redaction (det or hybrid per cfg) to chunk.page_content in place. Returns chunks."""
+    if not chunks:
+        return chunks
+    cfg = cfg or GrimalkinConfig()
+    mode = getattr(cfg, 'pii_redaction', 'deterministic')
+    if mode == 'off':
+        return chunks
+    for chunk in chunks:
+        # ensure meta (used by some paths)
+        if not hasattr(chunk, 'metadata') or chunk.metadata is None:
+            chunk.metadata = {}
+        original = chunk.page_content
+        if mode == 'hybrid':
+            redacted, mapping = redact_hybrid(original, _scoped_policy(cfg, "DOC"))
+        else:
+            redacted, mapping = redact(original, _scoped_policy(cfg, "DOC"))
+        chunk.page_content = redacted
+        if mapping:
+            chunk.metadata["pii_redacted"] = "true"
+    return chunks
+
+
+def empty_vault_turn(query: str, respond_fn: Callable[[str], str], cfg: Optional[GrimalkinConfig] = None) -> str:
+    """Seam for empty-vault case (no boosted results): redact query, call respond_fn(redacted), return safe output.
+    respond_fn receives only the redacted query (test can wrap to supply context/persona).
+    """
+    redacted_query, qmap = prepare_query_for_llm(query, cfg, "Q")
+    llm_out = respond_fn(redacted_query)
+    return maybe_reveal_llm_output(llm_out, qmap, cfg)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -258,13 +353,7 @@ Rules:
 - If unreadable: empty arrays
 """
 
-LOADER_MAP = {
-    ".pdf": PyPDFLoader,
-    ".csv": CSVLoader,
-    ".docx": UnstructuredWordDocumentLoader,
-    ".doc": UnstructuredWordDocumentLoader,
-    **{ext: TextLoader for ext in _TEXT_EXTS},
-}
+# LOADER_MAP is now provided by _get_loader_map() (lazy)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -556,8 +645,24 @@ If context answers, use it. If not, say so honestly."""
 
 
 def build_enhanced_persona(ctx: AppContext, task_type: str = "general") -> str:
-    """Base persona + live corrections from FeedbackStore."""
+    """Base persona + live corrections from FeedbackStore.
+    Also honors gemma_personality_model config if a trained dir is pointed at.
+    """
     base = build_persona(ctx.db, ctx.config)
+    gpm = getattr(ctx.config, "gemma_personality_model", "") or ""
+    if gpm:
+        p = Path(gpm)
+        meta_path = p / "grimalkin_training_meta.json"
+        legacy_path = p / "config.json"
+        legacy_is_grimalkin = False
+        if legacy_path.exists():
+            try:
+                legacy_is_grimalkin = bool(json.loads(legacy_path.read_text()).get("grimalkin_use"))
+            except Exception:
+                legacy_is_grimalkin = False
+        if p.exists() and (meta_path.exists() or legacy_is_grimalkin):
+            base = base + f"\n[Loaded custom Gemma personality model: {gpm}]"
+            # when gpm active, the features.respond will short-circuit to invoke it for generation
     correction_ctx = ctx.feedback.build_correction_context(task_type)
     return base + "\n\n" + correction_ctx if correction_ctx else base
 
@@ -589,16 +694,52 @@ def classify_file(filepath: Path, db=None) -> str:
     return "MISC"
 
 
+LOADER_MAP = None  # populated lazily
+
 def load_and_chunk(filepath: Path, config: GrimalkinConfig = None) -> list:
     """Load a file and split into chunks with metadata."""
+    global LOADER_MAP
     ext = filepath.suffix.lower()
+    if LOADER_MAP is None:
+        try:
+            LOADER_MAP = _get_loader_map()
+        except Exception:
+            LOADER_MAP = {}
     loader_cls = LOADER_MAP.get(ext)
     if not loader_cls:
+        # Fallback simple loader for txt/md when langchain missing (for tests / env)
+        if ext in ('.txt', '.md'):
+            try:
+                with open(str(filepath), 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                chunk_size = (config.chunk_size if config else 800)
+                chunk_overlap = (config.chunk_overlap if config else 100)
+                docs = []
+                i = 0
+                while i < len(content):
+                    chunk_text = content[i:i+chunk_size]
+                    class SimpleDoc:
+                        def __init__(self, t, meta):
+                            self.page_content = t
+                            self.metadata = meta
+                    docs.append(SimpleDoc(chunk_text, {}))
+                    i += chunk_size - chunk_overlap if chunk_overlap < chunk_size else chunk_size
+                chunks = docs
+                cfg = config or GrimalkinConfig()
+                # ensure meta for filename/source on fallback docs
+                for chunk in chunks:
+                    chunk.metadata["filename"] = filepath.name
+                    chunk.metadata["source_path"] = str(filepath)
+                return redact_chunk_pages(chunks, cfg)
+            except Exception as e:
+                log.warning(f"Failed fallback load {filepath.name}: {e}")
+                return []
         return []
 
     chunk_size = config.chunk_size if config else 800
     chunk_overlap = config.chunk_overlap if config else 100
-    splitter = RecursiveCharacterTextSplitter(
+    Splitter = _get_text_splitter()
+    splitter = Splitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
     )
@@ -607,10 +748,11 @@ def load_and_chunk(filepath: Path, config: GrimalkinConfig = None) -> list:
         loader = loader_cls(str(filepath))
         docs = loader.load()
         chunks = splitter.split_documents(docs)
+        cfg = config or GrimalkinConfig()
         for chunk in chunks:
             chunk.metadata["filename"] = filepath.name
             chunk.metadata["source_path"] = str(filepath)
-        return chunks
+        return redact_chunk_pages(chunks, cfg)
     except Exception as e:
         log.warning(f"Failed to load {filepath.name}: {e}")
         return []
@@ -1034,7 +1176,10 @@ def keyword_search(db, query: str, limit: int = 10) -> set[str]:
 
 def hybrid_vault_rag(ctx: AppContext, query: str) -> str:
     """Hybrid keyword + semantic + graph RAG. The main retrieval path."""
-    results = ctx.memory.search(query, k=15)
+    cfg = getattr(ctx, 'config', GrimalkinConfig())
+    redacted_query, qmap = prepare_query_for_llm(query, cfg, "Q")
+
+    results = ctx.memory.search(redacted_query, k=15)
     cur = ctx.db.cursor()
 
     # Filter burned files (belt + suspenders — ghost vectors are fixed, but be safe)
@@ -1046,7 +1191,7 @@ def hybrid_vault_rag(ctx: AppContext, query: str) -> str:
             continue
         valid.append(r)
 
-    kw_fns = keyword_search(ctx.db, query)
+    kw_fns = keyword_search(ctx.db, redacted_query)
     boosted = []
     seen = set()
     for r in valid:
@@ -1074,13 +1219,15 @@ def hybrid_vault_rag(ctx: AppContext, query: str) -> str:
 
     if not boosted:
         persona = build_enhanced_persona(ctx, "vault_query")
-        return ctx.llm.respond(query, context="The vault is empty.", persona=persona)
+        def _respond(red_q: str) -> str:
+            return ctx.llm.respond(red_q, context="The vault is empty.", persona=persona)
+        return empty_vault_turn(query, _respond, cfg)
 
     boosted.sort(key=lambda x: x.score)
     context_parts = []
 
     # Target 5: semantic graph context
-    g = semantic_graph_context(ctx, query)
+    g = semantic_graph_context(ctx, redacted_query)
     if g:
         context_parts.append(f"My web shows these connections:\n{g}")
 
@@ -1089,18 +1236,24 @@ def hybrid_vault_rag(ctx: AppContext, query: str) -> str:
         context_parts.append("From my vault:\n" + "\n---\n".join(doc_parts))
 
     context = "\n\n".join(context_parts)
+    redacted_context, cmap = prepare_query_for_llm(context, cfg, "C") if context else (context, {})
+    # Note: prepare handles mode; for context we reuse (it redacts any text the same way)
+    full_map = merge_redaction_maps(qmap, cmap)
     persona = build_enhanced_persona(ctx, "vault_query")
-    return ctx.llm.respond(query, context=context, persona=persona)
+    llm_out = ctx.llm.respond(redacted_query, context=redacted_context, persona=persona)
+    return maybe_reveal_llm_output(llm_out, full_map, cfg)
 
 
 def recall(ctx: AppContext, term: str) -> str:
     """Deep recall: graph + keyword + reflections."""
-    g = semantic_graph_context(ctx, term)
-    kw = keyword_search(ctx.db, term)
+    cfg = getattr(ctx, 'config', GrimalkinConfig())
+    red_term, tmap = prepare_query_for_llm(term, cfg, "Q")
+    g = semantic_graph_context(ctx, red_term)
+    kw = keyword_search(ctx.db, red_term)
     cur = ctx.db.cursor()
     cur.execute(
         "SELECT summary FROM reflections WHERE key_entities LIKE ? ORDER BY reflection_date DESC LIMIT 3",
-        (f"%{term}%",),
+        (f"%{red_term}%",),
     )
     refs = [row[0] for row in cur.fetchall()]
 
@@ -1108,10 +1261,13 @@ def recall(ctx: AppContext, term: str) -> str:
     refs_text = "\n".join(refs[:2])
     context = f"Graph threads:\n{g}\n\nFiles with keyword: {kw_list}\n\nPast reflections:\n{refs_text}"
 
+    red_ctx, cmap = prepare_query_for_llm(context, cfg, "C") if context else (context, {})
+    full_map = merge_redaction_maps(tmap, cmap)
     persona = build_enhanced_persona(ctx, "general")
-    return ctx.llm.respond(
-        f"Tell me everything about {term}.", context=context, persona=persona
+    llm_out = ctx.llm.respond(
+        f"Tell me everything about {red_term}.", context=red_ctx, persona=persona
     )
+    return maybe_reveal_llm_output(llm_out, full_map, cfg)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

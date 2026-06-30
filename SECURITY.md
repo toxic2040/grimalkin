@@ -74,10 +74,11 @@ length-capped and read incrementally, so neither the operator nor the root helpe
 can exhaust memory with one oversized frame.
 
 Control authority is split further by effect. The configured operator uid may read
-status/audit state, arm the guardian, enable capabilities, and deny prompts. Root
-is required to lower protection or grant actuation: disarm, disable a capability,
-grant a prompt, or unblock a contained destination. This is deliberate for the
-public build — malware already running as the desktop user should not be able to
+status/audit state, enable sensor/detector capabilities, and deny prompts. Root is
+required for privileged posture changes or actuation: arm/disarm the guardian,
+enable or disable actuator capabilities, grant a prompt, or unblock a contained
+destination. This is deliberate for the public build — malware already running as
+the desktop user should not be able to
 switch the guardian off through the sanctioned IPC.
 
 ### Safety properties
