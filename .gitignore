@@ -35,3 +35,6 @@ sbom.cdx.json
 
 # Rust guardian build output
 guardian/target/
+
+# Model eval harness run artifacts (keep cases.json + the runner, not the results)
+eval/results/
