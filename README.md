@@ -58,7 +58,7 @@ Prototype training script (`scripts/train_gemma_pii.py`) for small local Gemma-c
 | Component | Role |
 |-----------|------|
 | Python 3.10+ | Runtime |
-| [Ollama](https://ollama.com) | Local LLM inference (qwen3:8b by default, configurable) |
+| [Ollama](https://ollama.com) | Local LLM inference (gemma4:12b-it-qat by default, swappable at runtime in Settings) |
 | FAISS | Vector similarity search |
 | LangChain + langchain-ollama | Document loading, text splitting, chat integration |
 | Gradio 6.x | Web UI |
@@ -99,7 +99,7 @@ The whole project — companion and guardian — is MIT licensed.
 Download from [ollama.com](https://ollama.com), then pull the models:
 
 ```bash
-ollama pull qwen3:8b             # reasoning model
+ollama pull gemma4:12b-it-qat    # chat model (needs Ollama 0.31+)
 ollama pull nomic-embed-text     # embedding model
 ```
 
@@ -226,8 +226,9 @@ grimalkin/
 ## Requirements
 
 - Python 3.10+
-- Ollama running locally with `qwen3:8b` and `nomic-embed-text`
-- ~8 GB RAM recommended for `qwen3:8b`; larger local models need more
+- Ollama 0.31+ running locally with `gemma4:12b-it-qat` and `nomic-embed-text`
+- ~10 GB RAM or VRAM recommended for `gemma4:12b-it-qat`; smaller models can be
+  selected at runtime in Settings → Model
 - Works on Linux, macOS, Windows (tested on Pop!_OS)
 
 ## License

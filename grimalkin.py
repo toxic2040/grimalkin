@@ -640,6 +640,19 @@ def get_setting(db, key, default=""):
     return row[0] if row else default
 
 
+_model_override = ""  # runtime chat-model swap (Settings tab) — overrides CFG.ollama_model
+
+
+def get_active_model() -> str:
+    """Chat model currently in use — Settings override beats CFG/env."""
+    return _model_override or CFG.ollama_model
+
+
+def set_active_model(name: str) -> None:
+    global _model_override
+    _model_override = (name or "").strip()
+
+
 def set_setting(db, key, value):
     db.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value))
@@ -991,7 +1004,7 @@ def _strip_think_artifacts(text: str, model: str) -> str:
 def ollama_chat(
     prompt: str,
     system: str = "",
-    model: str = CFG.ollama_model,
+    model: str = "",
     history: list[dict] | None = None,
 ) -> OllamaResult:
     """Chat via OpenAI-compatible endpoint. Returns (text, logprobs).
@@ -1003,7 +1016,7 @@ def ollama_chat(
     Retries with exponential backoff on connection failures."""
     if not HAS_REQUESTS:
         return OllamaResult("Hrk. Hairball. The requests library is missing.", [])
-    model = model or CFG.ollama_model
+    model = model or get_active_model()
     red_system, smap = _redact_runtime_text(system, "SYS")
     red_prompt, pmap = _redact_runtime_text(prompt, "P")
     red_history = []
@@ -1034,6 +1047,9 @@ def ollama_chat(
                     "stream": False,
                     "logprobs": True,
                     "top_logprobs": 5,
+                    # Grimmy answers, he doesn't deliberate: disable hidden thinking
+                    # on models that support it (gemma4, qwen3); others ignore this.
+                    "reasoning_effort": "none",
                 },
                 timeout=120,
             )
@@ -1248,7 +1264,7 @@ def _log_generation(
                 dist_min,
                 top_k,
                 response_len,
-                CFG.ollama_model,
+                get_active_model(),
                 metrics.get("n_informative"),
             ),
         )
@@ -4553,7 +4569,7 @@ def ui_header_panel(db) -> str:
     today = now.date()
     mode = "sandbox" if is_sandbox(db) else "live"
     graph_mode = get_graph_injection(db)
-    model = _clip(CFG.ollama_model, 26)
+    model = _clip(get_active_model(), 26)
     embed = _clip(CFG.embed_model, 24)
     endpoint = _clip(CFG.ollama_url.replace("http://", "").replace("https://", ""), 24)
     return f"""
@@ -5012,6 +5028,34 @@ def ui_save_behavior(db, serious, sandbox, graph_inj):
     return "*Settings updated.* " + " · ".join(msgs)
 
 
+def list_ollama_models() -> list[str]:
+    """Installed ollama chat tags for the Settings dropdown (embed models excluded)."""
+    names = []
+    if HAS_REQUESTS:
+        try:
+            resp = requests.get(f"{CFG.ollama_url}/api/tags", timeout=5)
+            resp.raise_for_status()
+            names = [m.get("name", "") for m in resp.json().get("models", [])]
+            names = [n for n in names if n and "embed" not in n.lower()]
+        except Exception as e:
+            log.warning(f"Could not list ollama models: {e}")
+    active = get_active_model()
+    if active and active not in names:
+        names.insert(0, active)
+    return names
+
+
+def ui_save_model(db, model_name):
+    """Persist the chat model and apply it to the live session."""
+    name = (model_name or "").strip()
+    if not name or name == get_active_model():
+        return "Nothing changed."
+    set_setting(db, "ollama_model", name)
+    set_active_model(name)
+    audit_event(db, "model_update", f"chat model set to {name}")
+    return f"*Settings updated.* Chat model: {name} — next response uses it."
+
+
 def ui_save_categories(db, categories_str):
     """Save custom categories from comma-separated string."""
     if not categories_str.strip():
@@ -5359,6 +5403,19 @@ def build_ui(db, index, metadata):
                 behavior_status,
             )
 
+            gr.Markdown("### Model")
+            s_model = gr.Dropdown(
+                choices=list_ollama_models(),
+                value=get_active_model(),
+                allow_custom_value=True,
+                label="Chat Model — applies immediately and persists, no restart",
+            )
+            save_model_btn = gr.Button("Apply Model", variant="primary")
+            model_status = gr.Markdown()
+            save_model_btn.click(
+                partial(ui_save_model, db), s_model, model_status
+            )
+
             gr.Markdown("### Categories")
             _custom = get_setting(db, "custom_categories", "[]")
             s_categories = gr.Textbox(
@@ -5495,6 +5552,7 @@ def main():
     db = init_db()
     run_migrations(db)
     ensure_dirs(db)
+    set_active_model(get_setting(db, "ollama_model", ""))
     index, metadata = init_faiss()
 
     start_scheduler(index, metadata)

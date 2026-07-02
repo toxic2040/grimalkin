@@ -122,6 +122,8 @@ def call_model(ollama_url, model, system, user, temperature, seed, timeout=180):
         "stream": False,
         "temperature": temperature,
         "seed": seed,
+        # mirrors the live path: no hidden thinking on models that support it
+        "reasoning_effort": "none",
     }).encode()
     req = urllib.request.Request(
         f"{ollama_url}/v1/chat/completions",

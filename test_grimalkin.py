@@ -759,6 +759,53 @@ def test_monolith_ollama_chat_redacts_prompt_history_and_system():
     assert "111-22-3333" not in result.text
 
 
+def test_active_model_override_reaches_ollama_chat():
+    if not grimalkin.HAS_REQUESTS:
+        print("requests absent; skipping active model override test")
+        return
+
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "meow"}, "logprobs": {"content": []}}]}
+
+    def fake_post(url, json=None, timeout=120):
+        captured["model"] = json["model"]
+        return FakeResponse()
+
+    try:
+        grimalkin.set_active_model("swapped-model:1b")
+        with patch.object(grimalkin.requests, "post", fake_post):
+            grimalkin.ollama_chat("hello")
+        assert captured["model"] == "swapped-model:1b"
+    finally:
+        grimalkin.set_active_model("")
+    assert grimalkin.get_active_model() == grimalkin.CFG.ollama_model
+
+
+def test_ui_save_model_persists_and_applies():
+    db = make_test_db()
+    try:
+        msg = grimalkin.ui_save_model(db, "  gemma-test:12b  ")
+        assert "gemma-test:12b" in msg
+        assert grimalkin.get_setting(db, "ollama_model") == "gemma-test:12b"
+        assert grimalkin.get_active_model() == "gemma-test:12b"
+        # applying the same model again is a no-op
+        assert grimalkin.ui_save_model(db, "gemma-test:12b") == "Nothing changed."
+        assert grimalkin.ui_save_model(db, "   ") == "Nothing changed."
+        # the swap leaves an audit trail
+        row = db.execute(
+            "SELECT detail FROM audit_log WHERE event_type='model_update'"
+        ).fetchone()
+        assert row and "gemma-test:12b" in row[0]
+    finally:
+        grimalkin.set_active_model("")
+
+
 def test_monolith_hybrid_vault_rag_redacts_query_before_retrieval():
     calls = {}
 
