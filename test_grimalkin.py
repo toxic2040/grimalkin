@@ -302,6 +302,23 @@ def test_non_loopback_launch_requires_auth_token():
         grimalkin.CFG = old_cfg
 
 
+def test_scheduler_is_opt_in():
+    old_cfg = grimalkin.CFG
+    try:
+        grimalkin.CFG = replace(old_cfg, scheduler_enabled=False)
+        with patch.object(grimalkin, "Thread") as thread:
+            assert grimalkin.start_scheduler(None, None) is False
+            thread.assert_not_called()
+
+        grimalkin.CFG = replace(old_cfg, scheduler_enabled=True)
+        with patch.object(grimalkin, "Thread") as thread:
+            assert grimalkin.start_scheduler(None, None, scan_minutes=60) is True
+            thread.assert_called_once()
+            thread.return_value.start.assert_called_once()
+    finally:
+        grimalkin.CFG = old_cfg
+
+
 def test_pyre_row_select_escapes_filename():
     class Event:
         index = [0]

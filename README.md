@@ -23,7 +23,7 @@ dependency lock above the current security floors.
 
 **Security hardening** narrows Gradio file serving to avatar assets only, requires `GRIM_AUTH_TOKEN` for non-loopback binds, and escapes attacker-controlled filenames/entity names in Pyre/Loom HTML surfaces.
 
-**Privacy Control Deck** shows the live local posture: Ollama endpoint, voice adapter readiness, plaintext memory footprint, metadata-only audit trail, file access mode, and git source state.
+**Privacy Control Deck** shows the live local posture: Ollama endpoint, voice adapter readiness, plaintext memory footprint, metadata-only audit trail, file access mode, scheduler state, and git source state.
 
 **Local voice dock templates** wire Scratch Post to local STT/TTS commands. The repo-local adapter detects Whisper/Vosk for transcription and Piper/espeak/flite/spd-say for speech, with browser microphone temp files discarded by default.
 
@@ -124,6 +124,10 @@ python grimalkin.py
 
 Open **http://localhost:7860** in your browser. The cat is waiting.
 
+Background file checks are off by default. Set `GRIM_SCHEDULER_ENABLED=true`
+only if you want local hunting-ground notifications every 30 minutes and daily
+grooming.
+
 ### Optional: local voice adapters
 
 The Scratch Post voice dock is disabled until local command templates are set. Grimalkin does not ship cloud STT/TTS bindings. The repo includes a small local adapter at `scripts/grim_voice.py`; it detects Whisper/Vosk for STT and Piper/espeak/flite/spd-say for TTS.
@@ -170,7 +174,7 @@ export GRIM_PIPER_MODEL=/path/to/piper-voice.onnx
 
 ## How It Works
 
-**File sorting:** The Hunt scans `~/Downloads` for new files (by SHA-256 hash), classifies them by extension into categories (FINANCIAL, PERSONAL, RESEARCH, MEDIA, MISC), copies them to `sorted/<CATEGORY>/`, and indexes supported formats into FAISS.
+**File sorting:** The Hunt scans `~/Downloads` for new files (by SHA-256 hash), classifies them by extension into categories (FINANCIAL, PERSONAL, RESEARCH, MEDIA, MISC), copies them to `sorted/<CATEGORY>/`, and indexes supported formats into FAISS. The full Hunt is manual; the optional scheduler only runs when `GRIM_SCHEDULER_ENABLED=true`.
 
 **Hybrid search:** Vault queries run both FAISS semantic search and keyword matching against filenames, tags, and notes. Results are merged and boosted — files matching by name get priority, but semantic matches still surface. Graph connections are injected into context when relevant.
 

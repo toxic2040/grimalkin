@@ -152,6 +152,7 @@ class GrimConfig:
     stt_command: str = ""  # local PTT transcription command template
     tts_command: str = ""  # local response speech command template
     keep_voice_audio: bool = False
+    scheduler_enabled: bool = False  # opt-in local background checks/grooming
     graph_injection: str = "auto"  # "auto", "always", "never"
     sandbox: bool = False  # dry-run mode for Pyre — no real deletions
     # Ingestion guards — files are parsed in an isolated worker (grimalkin_parse.py)
@@ -4902,7 +4903,12 @@ def ui_control_deck(db) -> str:
     files_total = _table_count(db, "file_memory", "WHERE burned_at IS NULL")
     unindexed = _table_count(db, "file_memory", "WHERE burned_at IS NULL AND indexed=0")
     file_mode = "sandbox" if is_sandbox(db) else "live"
-    file_detail = f"{files_total} tracked files · {unindexed} waiting · scheduled hunt scans Downloads"
+    scheduler_detail = (
+        "scheduled local checks enabled"
+        if CFG.scheduler_enabled
+        else "manual hunt; scheduled checks off"
+    )
+    file_detail = f"{files_total} tracked files · {unindexed} waiting · {scheduler_detail}"
 
     source_value, source_detail, source_class = _git_snapshot()
 
@@ -5457,6 +5463,10 @@ def build_ui(db, index, metadata):
 
 
 def start_scheduler(index, metadata, interval_hours=24, scan_minutes=30):
+    if not CFG.scheduler_enabled:
+        log.info("Scheduler disabled — manual hunt/groom only.")
+        return False
+
     def loop():
         ticks = 0
         groom_interval = int(interval_hours * 60 / scan_minutes)  # groom every N ticks
@@ -5475,6 +5485,7 @@ def start_scheduler(index, metadata, interval_hours=24, scan_minutes=30):
     log.info(
         f"Scheduler armed — scan every {scan_minutes}m, groom every {interval_hours}h."
     )
+    return True
 
 
 # ─── Auth ──────────────────────────────────────────────────────────────────────
