@@ -119,6 +119,18 @@ Current v0.1 limits:
   races.
 - The control and helper protocols cap each JSON line, but a local privileged peer
   can still deny service by flooding connections or events.
+- The Gradio companion Control Deck is **posture-only**: it does not speak the
+  guardian control protocol. Arm, grant, unblock, and capability changes go
+  through the standalone Rust deck (or any other root/operator client of the
+  socket). This is intentional for 5.1.0 so the unprivileged UI cannot be
+  mistaken for a privileged control plane.
+- **Same-uid autonomous-block / prompt-deny shape.** High-confidence
+  read-then-outbound detections may install reversible nft blocks without a
+  human grant. A process that already shares the operator uid can therefore
+  induce blocks (against its own destinations or others that match the rule)
+  and can deny open prompts. Root is still required to arm, disarm, grant, or
+  unblock through the sanctioned IPC. Treat a fully compromised operator
+  account as outside the guardian's win condition; see Boundary above.
 
 ## Dependencies
 

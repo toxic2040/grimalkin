@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Grimalkin v5.0.3 — Ingestion Isolation & Dependency Refresh
+Grimalkin v5.1.0 — Companion + Guardian
 =========================================
 
 A 100% local AI file-sorting familiar with persistent memory, FAISS-powered
@@ -104,7 +104,7 @@ except ImportError:
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
 
-VERSION = "5.0.3"
+VERSION = "5.1.0"
 APP_DIR = Path(__file__).resolve().parent
 VAULT_DIR = APP_DIR / "vault"
 SORTED_BASE = APP_DIR / "sorted"
@@ -4942,6 +4942,13 @@ def ui_control_deck(db) -> str:
             file_mode,
             file_detail,
             "warn" if file_mode == "live" else "ok",
+        ),
+        _control_card(
+            "Guardian",
+            "standalone deck",
+            "Gradio Control Deck is posture-only; arm/status/prompts run via "
+            "the Rust guardian deck (guardian/) over the control socket",
+            "warn",
         ),
         _control_card(
             "Source State",

@@ -2,6 +2,56 @@
 
 ---
 
+## v5.1.0 — Companion + Guardian
+
+Two-part product: the local AI companion and a privileged Linux security
+guardian, shipped under one MIT tree.
+
+### Guardian (new)
+
+| Feature | Detail |
+|---------|--------|
+| Rust guardian under `guardian/` | Optional, opt-in, dormant-by-default daemon (NFQUEUE + fanotify + nftables + cgroup freeze path) |
+| Master arm switch | Persisted armed/disarmed; disarmed = no sensing infrastructure |
+| Control protocol | NDJSON Unix socket with `SO_PEERCRED` + mode `0600`; root required for arm/disarm, grants, unblock, privileged actuators |
+| Standalone control deck | egui deck in `guardian/` drives the socket; Gradio Control Deck remains **posture-only** (known residual — see below) |
+| Threat model | Documented in `SECURITY.md` + `guardian` docs |
+
+### Companion
+
+| Change | Detail |
+|--------|--------|
+| Default model | `gemma4:12b-it-qat` with runtime model swap in Settings |
+| Shadow backend removed | Dead parallel `grimalkin_core` path cut; single redaction engine |
+| Model eval harness | `eval/` for base-model swap decisions |
+| STT | Local speech-to-text with engine fallbacks |
+| Scheduler | Background scheduler opt-in |
+
+### Known residuals (documented, not fixed in this tag)
+
+These were pre-push flags; they ship as explicit limits, not silent gaps.
+
+1. **Gradio Control Deck is posture-only.** It does not open the guardian
+   control socket. Arm, capability toggles, and prompts use the standalone
+   Rust deck. A Guardian card on the Gradio deck states this plainly.
+2. **Same-uid DoS / autonomous-block shape.** Once root has armed the
+   guardian and enabled sensing, a process running as the operator uid can
+   (a) deny containment prompts and (b) trigger high-confidence
+   read-then-outbound autonomous nft blocks against itself or peers. The
+   root-only IPC barrier does not cover that shape. Documented under
+   SECURITY.md Boundary. Defeat requires not arming on a fully compromised
+   operator account — out of v0.1 scope.
+3. **Parser / dep residuals from 5.0.3.** Isolated parse workers and
+   hash-pinned lock are in; Gradio PYSEC-2026-211 remains until upstream
+   ships a fix. Loopback default + auth token on non-loopback binds.
+
+### License
+
+Companion and guardian are MIT. The former GPL netlink dependency was
+removed during fold-in; nftables ops go through the `nft` binary.
+
+---
+
 ## v5.0.3 — Ingestion Isolation & Dependency Refresh
 
 ### Security
