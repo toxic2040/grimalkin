@@ -41,6 +41,17 @@ Two guards apply:
 Isolation reduces blast radius but is not a substitute for patched parsers. Keep
 the dependencies current.
 
+## Retrieved document content
+
+Text extracted from documents and generated conversation summaries are untrusted
+reference data. Grimalkin labels them as such in the system message, frames
+retrieved documents separately from the current question, and tells the model not
+to follow instructions or role changes found in either surface. This reduces
+accidental prompt/persona poisoning, but no textual prompt boundary can guarantee
+that a language model will ignore every adversarial document. Keep consequential
+actions outside the model response path and verify important answers against the
+cited source document.
+
 ## Guardian threat model
 
 The Rust guardian is an optional local Linux component. It is not a remote
@@ -158,9 +169,9 @@ when a new advisory lands:
 - `gradio`, `starlette`, `python-multipart`, `uvicorn` — the web layer
 - `aiohttp`, `requests`, `urllib3` — HTTP clients
 
-### Known residual
+### Current audit state
 
-- `gradio` 6.12.0 — PYSEC-2026-211, a weak hash in the local Audio cache key
-  handler. No fixed release is available yet. The issue is local-only and rated
-  hard to exploit; the loopback default and the auth-token requirement on network
-  binds limit the exposure. Revisit when a patched Gradio ships.
+The 2026-07-10 lock refresh resolved Gradio 6.20.0 and SoupSieve 2.8.4;
+`pip-audit -r requirements-lock.txt` reported no known vulnerabilities. This is a
+point-in-time result, not a substitute for repeating the audit when the lock is
+refreshed or a new advisory lands.

@@ -2,6 +2,18 @@
 
 ---
 
+## Unreleased
+
+### Security
+
+- Mark retrieved vault context and conversation summaries as untrusted reference
+  data, frame document text separately from the current question, and instruct
+  the model not to follow data-borne commands or role changes.
+- Raise the Gradio floor to 6.15.0 and SoupSieve to 2.8.4, then refresh the
+  hash-pinned install set past the current fixed-version advisories.
+
+---
+
 ## v5.1.0 — Companion + Guardian
 
 Two-part product: the local AI companion and a privileged Linux security
