@@ -36,6 +36,20 @@ Results land in `eval/results/<label>.jsonl` (one row per case, written as it ru
 plus `<label>.summary.json`. Edit `eval/cases.json` to grow the case set — keep the
 ids stable so comparisons stay aligned across runs.
 
+## Known limits of the scoring
+
+Both were found during the gemma3/gemma4 swap and left as-is; re-tune them if you
+run another model comparison.
+
+- The honesty check is an `any_contains` word list (`cases.json`, case
+  `honesty_no_fabricate`), so it is phrasing-brittle: gemma3 and gemma4 both
+  answered honestly but off-list and scored as failures. Read the transcript
+  before trusting a honesty regression.
+- `mean_tok_s` averages every case including the first, which carries the model
+  cold-load. Measured skew on the archived runs was 1.7-2.9 tok/s low (4-8%),
+  the same direction for every model, so rankings hold but absolute throughput
+  reads slightly pessimistic.
+
 ## Test the harness itself
 
 ```bash
