@@ -25,7 +25,6 @@ import argparse
 import json
 import os
 import sys
-import tempfile
 from pathlib import Path
 from datetime import datetime
 
@@ -69,8 +68,8 @@ def generate_persona_data(n: int = 10):
     """Simple synthetic for grimalkin-style personality fine-tune."""
     examples = []
     for i in range(n):
-        user = f"User: Remember my cat is named Whiskers and I live in the hills."
-        assistant = f"Grimalkin: Understood — Whiskers in the hills. How can I guard your vault today?"
+        user = "User: Remember my cat is named Whiskers and I live in the hills."
+        assistant = "Grimalkin: Understood — Whiskers in the hills. How can I guard your vault today?"
         examples.append({"text": f"{user}\n{assistant}"})
     return examples
 
@@ -111,7 +110,6 @@ def main():
         Adds LoRA if peft present. Saves HF style. No linear proxy.
         If deps missing, raises so caller uses honest stub.
         """
-        import hashlib
         model_dir = out_dir / "gemma_trained"
         model_dir.mkdir(parents=True, exist_ok=True)
         print("[REAL] entering real Gemma/personality training path")

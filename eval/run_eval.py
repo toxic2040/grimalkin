@@ -10,10 +10,12 @@ end to end — plus latency and tokens/sec.
 Usage:
   python eval/run_eval.py --model qwen3:8b                 # run, write results
   python eval/run_eval.py --model gemma3:12b --label gemma # run a candidate
-  python eval/run_eval.py --compare qwen3:8b gemma3:12b    # side-by-side decision view
+  python eval/run_eval.py --compare qwen3_8b gemma3_12b    # side-by-side decision view
 
 Results go to eval/results/<label>.jsonl (one line per case, written incrementally)
 plus <label>.summary.json. Swapping a model is then: run both, --compare, decide.
+--compare takes those labels, not model tags: an unlabelled run files itself
+under the model name with every non-[A-Za-z0-9._-] run replaced by "_".
 """
 
 import argparse

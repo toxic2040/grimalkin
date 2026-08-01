@@ -28,8 +28,9 @@ python eval/run_eval.py --model qwen3:8b
 ollama pull gemma3:12b
 python eval/run_eval.py --model gemma3:12b
 
-# side-by-side decision view
-python eval/run_eval.py --compare qwen3:8b gemma3_12b
+# side-by-side decision view — these are result labels, not model tags:
+# a run of `--model gemma3:12b` files itself under `gemma3_12b`
+python eval/run_eval.py --compare qwen3_8b gemma3_12b
 ```
 
 Results land in `eval/results/<label>.jsonl` (one row per case, written as it runs)

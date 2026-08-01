@@ -57,7 +57,7 @@ Prototype training script (`scripts/train_gemma_pii.py`) for small local Gemma-c
 
 | Component | Role |
 |-----------|------|
-| Python 3.10+ | Runtime |
+| Python 3.11+ | Runtime |
 | [Ollama](https://ollama.com) | Local LLM inference (gemma4:12b-it-qat by default, swappable at runtime in Settings) |
 | FAISS | Vector similarity search |
 | LangChain + langchain-ollama | Document loading, text splitting, chat integration |
@@ -205,7 +205,10 @@ grimalkin/
 ├── grimalkin_interfaces.py   # Config + backend protocols
 ├── scripts/grim_voice.py     # Local STT/TTS command adapter
 ├── eval/                     # Model eval harness (base-model swap decisions)
-├── test_grimalkin.py         # Test suite
+│   └── test_eval.py          # Scoring-logic tests (no model in the loop)
+├── test_grimalkin.py         # Main test suite
+├── test_redact_standalone.py # Redaction engine, importable without the app
+├── scripts/test_grim_voice.py # Voice adapter tests
 ├── grimalkin.jpg             # Hero image
 ├── grimalkin_avatar.jpg      # Avatar / social icon
 ├── grimalkin.db              # SQLite database (created on first run)
@@ -227,15 +230,29 @@ grimalkin/
 └── vault/                    # Reserved for future use
 ```
 
+Everything marked "created on first run" is live state sitting inside the git
+working tree: `grimalkin.db` (plus its `-wal`/`-shm`), `faiss_index/`,
+`sorted/`, `vault/` and your `.env`. All of them are gitignored, which is what
+makes them vulnerable — `git clean -xdf` deletes exactly the ignored files, so
+one careless clean takes the database, the vector index, the sorted vault and
+your secrets with it. There is no backup step in this repo. Use `git clean -nxd`
+first, and keep the database and `sorted/` in whatever backup you already run.
+
 ## Tests
 
 Pure logic — no Ollama, no Gradio server, no network. Run from the repo root
 with the interpreter you installed the requirements into:
 
 ```bash
-pip install pytest      # not in requirements-lock.txt; test-only dependency
+pip install pytest      # deliberately absent from both requirements files
 python3 -m pytest -q
 ```
+
+Install `pytest` on its own and leave the lock alone. Adding it to
+`requirements.txt` would drag it and its dependency tree into
+`requirements-lock.txt`, and that regeneration is the `pip-compile` +
+`pip-audit` process in `SECURITY.md` — not something to trigger for a
+test-only tool that never ships to a user.
 
 A bare run collects the whole tree: `test_grimalkin.py` (the main suite),
 `test_redact_standalone.py`, `scripts/test_grim_voice.py`, and the eval
@@ -244,7 +261,11 @@ harness tests under `eval/`. Narrow it with a path —
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.11+. That floor comes from the lock itself, not from the source:
+  `requirements-lock.txt` pins `numpy==2.4.4`, whose own metadata is
+  `Requires-Python >=3.11`, so `pip install --require-hashes` cannot resolve on
+  3.10 — and with hashes pinned there is no older numpy to fall back to. The
+  lock was compiled under 3.12; the suite is run here on 3.13.
 - Ollama 0.31+ running locally with `gemma4:12b-it-qat` and `nomic-embed-text`
 - ~10 GB RAM or VRAM recommended for `gemma4:12b-it-qat`; smaller models can be
   selected at runtime in Settings → Model

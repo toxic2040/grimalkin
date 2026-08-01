@@ -4,25 +4,31 @@ Grimalkin binds to `127.0.0.1` by default — only reachable from the local
 machine. If you need to expose it on the LAN or beyond, follow the steps
 below.
 
-## 1. Enable non-loopback binding
+## 1. Set an auth token
+
+The token is a precondition, not a later hardening step. A non-loopback bind
+without one is refused outright:
 
 ```bash
-python grimalkin.py --host 0.0.0.0
+$ python grimalkin.py --host 0.0.0.0
+Refusing non-loopback launch without GRIM_AUTH_TOKEN. Set GRIM_AUTH_TOKEN or bind to 127.0.0.1.
 ```
 
-You will see a warning on stderr reminding you to set up TLS.
-
-## 2. Set an auth token
-
-Without a token, anyone who can reach the port can use the UI.
+Without a token, anyone who can reach the port could use the UI, so set one:
 
 ```bash
 export GRIM_AUTH_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+```
+
+## 2. Enable non-loopback binding
+
+```bash
 python grimalkin.py --host 0.0.0.0
 ```
 
-Gradio will show a login prompt. Enter anything as the username and the
-token as the password.
+Now it starts, with a warning on stderr reminding you to set up TLS. Gradio
+shows a login prompt: enter anything as the username and the token as the
+password.
 
 ## 3. Terminate TLS with a reverse proxy
 
