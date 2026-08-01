@@ -227,6 +227,21 @@ grimalkin/
 └── vault/                    # Reserved for future use
 ```
 
+## Tests
+
+Pure logic — no Ollama, no Gradio server, no network. Run from the repo root
+with the interpreter you installed the requirements into:
+
+```bash
+pip install pytest      # not in requirements-lock.txt; test-only dependency
+python3 -m pytest -q
+```
+
+A bare run collects the whole tree: `test_grimalkin.py` (the main suite),
+`test_redact_standalone.py`, `scripts/test_grim_voice.py`, and the eval
+harness tests under `eval/`. Narrow it with a path —
+`python3 -m pytest test_grimalkin.py -q`.
+
 ## Requirements
 
 - Python 3.10+
