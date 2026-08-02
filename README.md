@@ -254,6 +254,15 @@ Install `pytest` on its own and leave the lock alone. Adding it to
 `pip-audit` process in `SECURITY.md` — not something to trigger for a
 test-only tool that never ships to a user.
 
+Installing it afterwards does not disturb a `--require-hashes` install of the
+lock. pytest 9 asks for `packaging>=22` and `pygments>=2.7.2`, and the lock
+already pins `packaging==26.0` and `pygments==2.20.0`, both of which satisfy
+those floors; its other two requirements, `iniconfig` and `pluggy`, are not in
+the lock at all. So pip adds two packages and moves nothing that is pinned.
+
+"No network" is meant literally: the whole suite passes inside an empty network
+namespace (`unshare -rn python3 -m pytest -q`), with no Ollama reachable.
+
 A bare run collects the whole tree: `test_grimalkin.py` (the main suite),
 `test_redact_standalone.py`, `scripts/test_grim_voice.py`, and the eval
 harness tests under `eval/`. Narrow it with a path —
